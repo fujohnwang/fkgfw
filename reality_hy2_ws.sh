@@ -1,29 +1,5 @@
 #!/bin/bash
 
-# Security warning
-echo "=========================================="
-echo "安全提示 / Security Notice"
-echo "=========================================="
-echo "此脚本将会："
-echo "1. 下载并安装 sing-box 和 cloudflared 二进制文件"
-echo "2. 创建系统服务并以专用用户运行"
-echo "3. 生成加密密钥和证书"
-echo "4. 启动 cloudflared tunnel (会暴露本地端口到公网)"
-echo ""
-echo "请确保："
-echo "- 你信任此脚本的来源"
-echo "- 你已经审查过脚本内容"
-echo "- 你的系统已经做好备份"
-echo "- 你了解 cloudflared tunnel 的安全风险"
-echo "=========================================="
-echo ""
-read -p "是否继续安装? (yes/no): " confirm
-if [ "$confirm" != "yes" ]; then
-    echo "安装已取消"
-    exit 0
-fi
-echo ""
-
 # Function to print characters with delay
 print_with_delay() {
     text="$1"
@@ -331,31 +307,121 @@ download_cloudflared(){
   exit 1
 }
 
-# Create cloudflared systemd service
-create_cloudflared_service(){
-  local vmess_port="$1"
-  local vless_ws_port="$2"
-  local vmess_path="$3"
-  local vless_ws_path="$4"
-  
-  # Create directory for argo file
-  mkdir -p /etc/sing-box
+# Download caddy binary
+download_caddy(){
+  arch=$(uname -m)
+  case ${arch} in
+      x86_64)  caddy_arch="amd64" ;;
+      aarch64) caddy_arch="arm64" ;;
+      armv7l)  caddy_arch="armv7" ;;
+  esac
+
+  echo "正在下载 caddy..."
+  mkdir -p /usr/local/bin
+
+  if [ -f "/usr/local/bin/caddy" ]; then
+      echo "检测到已存在的 caddy，停止相关进程..."
+      systemctl stop caddy 2>/dev/null || true
+      rm -f /usr/local/bin/caddy
+  fi
+
+  caddy_url="https://caddyserver.com/api/download?os=linux&arch=${caddy_arch}"
+  temp_file="/tmp/caddy.tmp.$$"
+
+  max_retries=3
+  retry_count=0
+  while [ $retry_count -lt $max_retries ]; do
+      echo "尝试下载 ($((retry_count + 1))/$max_retries)..."
+      if curl -L --fail --connect-timeout 30 --max-time 300 --progress-bar -o "$temp_file" "$caddy_url" 2>&1; then
+          echo "✓ caddy 下载完成"
+          mv "$temp_file" /usr/local/bin/caddy
+          chown root:root /usr/local/bin/caddy
+          chmod 755 /usr/local/bin/caddy
+          echo ""
+          return 0
+      else
+          retry_count=$((retry_count + 1))
+          rm -f "$temp_file"
+          if [ $retry_count -lt $max_retries ]; then
+              echo "✗ 下载失败，3秒后重试..."
+              sleep 3
+          fi
+      fi
+  done
+
+  echo ""
+  echo "错误: caddy 下载失败（已重试 $max_retries 次）"
+  exit 1
+}
+
+# Create caddy service for local path-based reverse proxy
+create_caddy_service(){
+  local caddy_port="$1"
+  local vmess_port="$2"
+  local vless_ws_port="$3"
+  local vmess_path="$4"
+  local vless_ws_path="$5"
 
   # Ensure paths start with /
   [[ $vmess_path != /* ]] && vmess_path="/$vmess_path"
   [[ $vless_ws_path != /* ]] && vless_ws_path="/$vless_ws_path"
 
-  # Create cloudflared ingress config (multi-path routing)
-  cat > /etc/sing-box/cloudflared_config.yml <<CFEOF
-ingress:
-  - path: ${vmess_path}
-    service: http://localhost:${vmess_port}
-  - path: ${vless_ws_path}
-    service: http://localhost:${vless_ws_port}
-  - service: http_status:404
-CFEOF
-  chown singbox:singbox /etc/sing-box/cloudflared_config.yml
-  chmod 600 /etc/sing-box/cloudflared_config.yml
+  mkdir -p /etc/caddy
+
+  cat > /etc/caddy/Caddyfile <<CADDYEOF
+{
+    auto_https off
+    admin off
+}
+
+:${caddy_port} {
+    handle ${vmess_path}* {
+        reverse_proxy localhost:${vmess_port}
+    }
+    handle ${vless_ws_path}* {
+        reverse_proxy localhost:${vless_ws_port}
+    }
+    respond 404
+}
+CADDYEOF
+  chmod 644 /etc/caddy/Caddyfile
+
+  cat > /etc/systemd/system/caddy.service <<EOF
+[Unit]
+Description=Caddy Local Reverse Proxy
+After=network.target sing-box.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/etc/caddy
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# Create cloudflared systemd service
+create_cloudflared_service(){
+  local caddy_port="$1"
+  
+  # Create directory for argo file
+  mkdir -p /etc/sing-box
 
   # Create a helper script for ExecStartPost to avoid escaping issues
   cat > /usr/local/bin/cloudflared-post-start.sh <<'SCRIPT'
@@ -370,7 +436,7 @@ SCRIPT
   cat > /etc/systemd/system/cloudflared.service <<EOF
 [Unit]
 Description=Cloudflared Tunnel
-After=network.target sing-box.service
+After=network.target caddy.service
 Wants=network.target
 
 [Service]
@@ -378,7 +444,7 @@ Type=simple
 User=singbox
 Group=singbox
 ExecStartPre=/bin/sleep 3
-ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/sing-box/cloudflared_config.yml --no-autoupdate --edge-ip-version auto --protocol h2mux --logfile /var/log/cloudflared.log
+ExecStart=/usr/local/bin/cloudflared tunnel --url http://localhost:${caddy_port} --no-autoupdate --edge-ip-version auto --protocol h2mux --logfile /var/log/cloudflared.log
 ExecStartPost=/usr/local/bin/cloudflared-post-start.sh
 Restart=on-failure
 RestartSec=10
@@ -918,20 +984,23 @@ EOF
 uninstall_singbox() {
           echo "Uninstalling..."
           # Stop and disable services
-          systemctl stop sing-box cloudflared 2>/dev/null
-          systemctl disable sing-box cloudflared > /dev/null 2>&1
+          systemctl stop sing-box cloudflared caddy 2>/dev/null
+          systemctl disable sing-box cloudflared caddy > /dev/null 2>&1
 
           # Remove service files
           rm -f /etc/systemd/system/sing-box.service
           rm -f /etc/systemd/system/cloudflared.service
+          rm -f /etc/systemd/system/caddy.service
           systemctl daemon-reload
           
           # Remove binaries
           rm -f /usr/local/bin/sing-box
           rm -f /usr/local/bin/cloudflared
+          rm -f /usr/local/bin/caddy
           
           # Remove configuration and data
           rm -rf /etc/sing-box/
+          rm -rf /etc/caddy/
           rm -f /var/log/cloudflared.log
           
           # Remove user (optional, commented out for safety)
@@ -961,13 +1030,16 @@ if [ -f "/etc/sing-box/config.json" ] && [ -f "/usr/local/bin/sing-box" ] && [ -
         1)
           show_notice "Reinstalling..."
           # Uninstall previous installation
-          systemctl stop sing-box cloudflared 2>/dev/null
-          systemctl disable sing-box cloudflared > /dev/null 2>&1
+          systemctl stop sing-box cloudflared caddy 2>/dev/null
+          systemctl disable sing-box cloudflared caddy > /dev/null 2>&1
           rm -f /etc/systemd/system/sing-box.service
           rm -f /etc/systemd/system/cloudflared.service
+          rm -f /etc/systemd/system/caddy.service
           rm -rf /etc/sing-box/
+          rm -rf /etc/caddy/
           rm -f /usr/local/bin/sing-box
           rm -f /usr/local/bin/cloudflared
+          rm -f /usr/local/bin/caddy
           rm -f /var/log/cloudflared.log
           
           # Proceed with installation
@@ -1056,6 +1128,8 @@ create_singbox_user
 download_singbox
 
 download_cloudflared
+
+download_caddy
 
 # reality
 echo "开始配置Reality"
@@ -1148,16 +1222,27 @@ read -p "vless ws路径 (无需加斜杠,默认随机生成): " vless_ws_path
 vless_ws_path=${vless_ws_path:-$(/usr/local/bin/sing-box generate rand --hex 6)}
 vless_ws_path=$(echo "$vless_ws_path" | sed 's|^\/||')
 
-# Stop any existing cloudflared process
-systemctl stop cloudflared 2>/dev/null
+# Caddy local reverse proxy port
+caddy_port=28080
+
+# Stop any existing processes
+systemctl stop cloudflared caddy 2>/dev/null
 pkill -f cloudflared 2>/dev/null
+pkill -f caddy 2>/dev/null
 
-# Create cloudflared service (multi-path ingress)
-create_cloudflared_service "$vmess_port" "$vless_ws_port" "$ws_path" "$vless_ws_path"
+# Create caddy service (path-based routing to vmess and vless-ws)
+create_caddy_service "$caddy_port" "$vmess_port" "$vless_ws_port" "$ws_path" "$vless_ws_path"
 
-# Start cloudflared and wait for tunnel
-echo "启动 cloudflared tunnel..."
+# Create cloudflared service (points to caddy)
+create_cloudflared_service "$caddy_port"
+
+# Start caddy first, then cloudflared
+echo "启动 caddy 本地反代..."
 systemctl daemon-reload
+systemctl enable caddy > /dev/null 2>&1
+systemctl start caddy
+
+echo "启动 cloudflared tunnel..."
 systemctl enable cloudflared > /dev/null 2>&1
 systemctl start cloudflared
 
@@ -1349,16 +1434,18 @@ if /usr/local/bin/sing-box check -c /etc/sing-box/config.json; then
     sleep 2
     
     # Check if services are running
-    if systemctl is-active --quiet sing-box && systemctl is-active --quiet cloudflared; then
+    if systemctl is-active --quiet sing-box && systemctl is-active --quiet caddy && systemctl is-active --quiet cloudflared; then
         echo "✓ 所有服务启动成功"
         show_client_configuration
     else
         echo "警告: 部分服务可能未正常启动"
         echo "sing-box 状态: $(systemctl is-active sing-box)"
+        echo "caddy 状态: $(systemctl is-active caddy)"
         echo "cloudflared 状态: $(systemctl is-active cloudflared)"
         echo ""
         echo "请检查日志:"
         echo "  journalctl -u sing-box -n 50"
+        echo "  journalctl -u caddy -n 50"
         echo "  journalctl -u cloudflared -n 50"
     fi
 else
