@@ -1,5 +1,27 @@
 #!/bin/bash
 
+# Security warning
+echo "=========================================="
+echo "安全提示 / Security Notice"
+echo "=========================================="
+echo "此脚本将会："
+echo "1. 下载并安装 sing-box 二进制文件"
+echo "2. 创建系统服务并以专用用户运行"
+echo "3. 生成加密密钥和证书"
+echo ""
+echo "请确保："
+echo "- 你信任此脚本的来源"
+echo "- 你已经审查过脚本内容"
+echo "- 你的系统已经做好备份"
+echo "=========================================="
+echo ""
+read -p "是否继续安装? (yes/no): " confirm
+if [ "$confirm" != "yes" ]; then
+    echo "安装已取消"
+    exit 0
+fi
+echo ""
+
 # Function to print characters with delay
 print_with_delay() {
     text="$1"
@@ -21,7 +43,7 @@ show_notice() {
     echo "#######################################################################################################################"
 }
 # Introduction animation
-print_with_delay "sing-reality-hy2-box by 绵阿羊" 0.05
+print_with_delay "sing-reality-hy2-box by 绵阿羊 (安全增强版)" 0.05
 echo ""
 echo ""
 # install base
@@ -42,6 +64,70 @@ install_base(){
           exit 1
       fi
   fi
+}
+
+# Create dedicated user for sing-box
+create_singbox_user(){
+  if ! id -u singbox &> /dev/null; then
+      echo "创建 singbox 专用用户..."
+      useradd -r -s /sbin/nologin -M singbox
+      echo "singbox 用户创建完成"
+  else
+      echo "singbox 用户已存在"
+  fi
+}
+
+# Verify file checksum (if available)
+verify_checksum(){
+  local file="$1"
+  local expected_checksum="$2"
+  
+  if [ -z "$expected_checksum" ]; then
+      echo "警告: 未提供校验和，跳过验证"
+      return 0
+  fi
+  
+  echo "验证文件完整性..."
+  local actual_checksum=$(sha256sum "$file" | awk '{print $1}')
+  
+  if [ "$actual_checksum" = "$expected_checksum" ]; then
+      echo "✓ 文件校验通过"
+      return 0
+  else
+      echo "✗ 文件校验失败!"
+      echo "期望: $expected_checksum"
+      echo "实际: $actual_checksum"
+      return 1
+  fi
+}
+
+# Set secure file permissions
+set_secure_permissions(){
+  echo "设置安全文件权限..."
+  
+  # Protect configuration files
+  if [ -f "/root/sbconfig_server.json" ]; then
+      chmod 600 /root/sbconfig_server.json
+      chown singbox:singbox /root/sbconfig_server.json 2>/dev/null || chown root:root /root/sbconfig_server.json
+  fi
+  
+  if [ -f "/root/sbconfig_client.json" ]; then
+      chmod 600 /root/sbconfig_client.json
+  fi
+  
+  # Protect key files
+  if [ -f "/root/public.key.b64" ]; then
+      chmod 600 /root/public.key.b64
+  fi
+  
+  # Protect certificate directory
+  if [ -d "/root/self-cert" ]; then
+      chmod 700 /root/self-cert
+      chmod 600 /root/self-cert/*.pem 2>/dev/null
+      chmod 600 /root/self-cert/*.key 2>/dev/null
+  fi
+  
+  echo "文件权限设置完成"
 }
 
 download_sing_box(){
@@ -75,12 +161,41 @@ download_sing_box(){
 
   # Prepare download URL
   url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz"
+  checksum_url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz.sha256sum"
 
+  echo "正在下载 sing-box..."
   # Download the latest release package (.tar.gz) from GitHub
-  curl -sLo "/root/${package_name}.tar.gz" "$url"
+  if ! curl -sLo "/root/${package_name}.tar.gz" "$url"; then
+      echo "错误: 下载失败"
+      exit 1
+  fi
 
+  # Try to download and verify checksum
+  echo "尝试验证文件完整性..."
+  http_code=$(curl -sL -w "%{http_code}" -o "/root/${package_name}.tar.gz.sha256sum" "$checksum_url")
+  
+  if [ "$http_code" = "200" ] && [ -s "/root/${package_name}.tar.gz.sha256sum" ]; then
+      # Check if file contains valid checksum (not HTML error page)
+      expected_checksum=$(cat "/root/${package_name}.tar.gz.sha256sum" | awk '{print $1}')
+      if [[ "$expected_checksum" =~ ^[a-f0-9]{64}$ ]]; then
+          if ! verify_checksum "/root/${package_name}.tar.gz" "$expected_checksum"; then
+              echo "错误: 文件校验失败，可能被篡改"
+              rm -f "/root/${package_name}.tar.gz" "/root/${package_name}.tar.gz.sha256sum"
+              exit 1
+          fi
+          echo "✓ 文件完整性验证通过"
+      else
+          echo "警告: 校验和文件格式无效，跳过验证"
+      fi
+      rm -f "/root/${package_name}.tar.gz.sha256sum"
+  else
+      echo "提示: sing-box 项目未提供校验和文件"
+      echo "      已从官方 GitHub 仓库下载，风险相对较低"
+      echo "      建议: 手动验证文件来源的可信度"
+  fi
 
   # Extract the package and move the binary to /root
+  echo "解压文件..."
   tar -xzf "/root/${package_name}.tar.gz" -C /root
   mv "/root/${package_name}/sing-box" /root/
 
@@ -89,7 +204,8 @@ download_sing_box(){
 
   # Set the permissions
   chown root:root /root/sing-box
-  chmod +x /root/sing-box
+  chmod 755 /root/sing-box
+  echo "sing-box 下载完成"
   echo ""
 }
 
@@ -250,6 +366,13 @@ EOF
 }
 
 install_base
+
+# Check root privileges
+if [ "$EUID" -ne 0 ]; then 
+    echo "错误: 此脚本需要 root 权限运行"
+    echo "请使用: sudo bash $0"
+    exit 1
+fi
 
 # Check if reality.json, sing-box, and sing-box.service already exist
 if [ -f "/root/sbconfig_server.json" ] && [ -f "/root/sing-box" ] && [ -f "/root/public.key.b64" ] && [ -f "/etc/systemd/system/sing-box.service" ]; then
@@ -692,13 +815,24 @@ jq -n --arg listen_port "$listen_port" --arg server_name "$server_name" --arg pu
 }' > /root/sbconfig_client.json
 
 
-# Create sing-box.service
+# Create dedicated user
+create_singbox_user
+
+# Set secure permissions
+set_secure_permissions
+
+# Create sing-box.service with dedicated user
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
 After=network.target nss-lookup.target
+Wants=network.target
 
 [Service]
-User=root
+Type=simple
+User=singbox
+Group=singbox
 WorkingDirectory=/root
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
@@ -706,7 +840,24 @@ ExecStart=/root/sing-box run -c /root/sbconfig_server.json
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10
+RestartPreventExitStatus=23
 LimitNOFILE=infinity
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/root
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

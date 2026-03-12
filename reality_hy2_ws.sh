@@ -1,5 +1,29 @@
 #!/bin/bash
 
+# Security warning
+echo "=========================================="
+echo "安全提示 / Security Notice"
+echo "=========================================="
+echo "此脚本将会："
+echo "1. 下载并安装 sing-box 和 cloudflared 二进制文件"
+echo "2. 创建系统服务并以专用用户运行"
+echo "3. 生成加密密钥和证书"
+echo "4. 启动 cloudflared tunnel (会暴露本地端口到公网)"
+echo ""
+echo "请确保："
+echo "- 你信任此脚本的来源"
+echo "- 你已经审查过脚本内容"
+echo "- 你的系统已经做好备份"
+echo "- 你了解 cloudflared tunnel 的安全风险"
+echo "=========================================="
+echo ""
+read -p "是否继续安装? (yes/no): " confirm
+if [ "$confirm" != "yes" ]; then
+    echo "安装已取消"
+    exit 0
+fi
+echo ""
+
 # Function to print characters with delay
 print_with_delay() {
     text="$1"
@@ -21,7 +45,6 @@ show_notice() {
     echo "#######################################################################################################################"
 }
 # Introduction animation
-print_with_delay "sing-reality-hy2-box by 绵阿羊" 0.05
 echo ""
 echo ""
 # install base
@@ -43,27 +66,85 @@ install_base(){
       fi
   fi
 }
-# regenrate cloudflared argo
-regenarte_cloudflared_argo(){
-  pid=$(pgrep -f cloudflared)
-  if [ -n "$pid" ]; then
-    # 终止进程
-    kill "$pid"
+
+# Create dedicated user for sing-box
+create_singbox_user(){
+  if ! id -u singbox &> /dev/null; then
+      echo "创建 singbox 专用用户..."
+      useradd -r -s /sbin/nologin -M singbox
+      echo "singbox 用户创建完成"
+  else
+      echo "singbox 用户已存在"
   fi
+}
 
-  vmess_port=$(jq -r '.inbounds[2].listen_port' /root/sbox/sbconfig_server.json)
-  #生成地址
-  /root/sbox/cloudflared-linux tunnel --url http://localhost:$vmess_port --no-autoupdate --edge-ip-version auto --protocol h2mux>argo.log 2>&1 &
-  sleep 2
-  clear
-  echo 等待cloudflare argo生成地址
+# Verify file checksum
+verify_checksum(){
+  local file="$1"
+  local expected_checksum="$2"
+  
+  if [ -z "$expected_checksum" ]; then
+      echo "警告: 未提供校验和，跳过验证"
+      return 0
+  fi
+  
+  echo "验证文件完整性..."
+  local actual_checksum=$(sha256sum "$file" | awk '{print $1}')
+  
+  if [ "$actual_checksum" = "$expected_checksum" ]; then
+      echo "✓ 文件校验通过"
+      return 0
+  else
+      echo "✗ 文件校验失败!"
+      echo "期望: $expected_checksum"
+      echo "实际: $actual_checksum"
+      return 1
+  fi
+}
+
+# Set secure file permissions
+set_secure_permissions(){
+  echo "设置安全文件权限..."
+  
+  # Protect configuration files
+  if [ -f "/root/sbox/sbconfig_server.json" ]; then
+      chmod 600 /root/sbox/sbconfig_server.json
+      chown singbox:singbox /root/sbox/sbconfig_server.json 2>/dev/null || chown root:root /root/sbox/sbconfig_server.json
+  fi
+  
+  # Protect key files
+  if [ -f "/root/sbox/public.key.b64" ]; then
+      chmod 600 /root/sbox/public.key.b64
+  fi
+  
+  if [ -f "/root/sbox/argo.txt.b64" ]; then
+      chmod 600 /root/sbox/argo.txt.b64
+  fi
+  
+  # Protect certificate directory
+  if [ -d "/root/self-cert" ]; then
+      chmod 700 /root/self-cert
+      chmod 600 /root/self-cert/*.pem 2>/dev/null
+      chmod 600 /root/self-cert/*.key 2>/dev/null
+  fi
+  
+  echo "文件权限设置完成"
+}
+# regenrate cloudflared argo using systemd
+regenarte_cloudflared_argo(){
+  echo "重启 cloudflared 服务..."
+  systemctl restart cloudflared
   sleep 5
-  #连接到域名
-  argo=$(cat argo.log | grep trycloudflare.com | awk 'NR==2{print}' | awk -F// '{print $2}' | awk '{print $1}')
-  echo "$argo" | base64 > /root/sbox/argo.txt.b64
-  rm -rf argo.log
-
-  }
+  
+  # Read argo domain from file
+  if [ -f "/root/sbox/argo.txt.b64" ]; then
+      argo=$(base64 --decode /root/sbox/argo.txt.b64)
+      echo "Cloudflared tunnel 地址: $argo"
+  else
+      echo "错误: 无法找到 argo 地址文件"
+      return 1
+  fi
+}
 # download singbox and cloudflared
 download_singbox(){
   arch=$(uname -m)
@@ -92,10 +173,41 @@ download_singbox(){
   package_name="sing-box-${latest_version}-linux-${arch}"
   # Prepare download URL
   url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz"
+  checksum_url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz.sha256sum"
+  
+  echo "正在下载 sing-box..."
   # Download the latest release package (.tar.gz) from GitHub
-  curl -sLo "/root/${package_name}.tar.gz" "$url"
+  if ! curl -sLo "/root/${package_name}.tar.gz" "$url"; then
+      echo "错误: 下载失败"
+      exit 1
+  fi
+
+  # Try to download and verify checksum
+  echo "尝试验证文件完整性..."
+  http_code=$(curl -sL -w "%{http_code}" -o "/root/${package_name}.tar.gz.sha256sum" "$checksum_url")
+  
+  if [ "$http_code" = "200" ] && [ -s "/root/${package_name}.tar.gz.sha256sum" ]; then
+      # Check if file contains valid checksum (not HTML error page)
+      expected_checksum=$(cat "/root/${package_name}.tar.gz.sha256sum" | awk '{print $1}')
+      if [[ "$expected_checksum" =~ ^[a-f0-9]{64}$ ]]; then
+          if ! verify_checksum "/root/${package_name}.tar.gz" "$expected_checksum"; then
+              echo "错误: 文件校验失败，可能被篡改"
+              rm -f "/root/${package_name}.tar.gz" "/root/${package_name}.tar.gz.sha256sum"
+              exit 1
+          fi
+          echo "✓ 文件完整性验证通过"
+      else
+          echo "警告: 校验和文件格式无效，跳过验证"
+      fi
+      rm -f "/root/${package_name}.tar.gz.sha256sum"
+  else
+      echo "提示: sing-box 项目未提供校验和文件"
+      echo "      已从官方 GitHub 仓库下载，风险相对较低"
+      echo "      建议: 手动验证文件来源的可信度"
+  fi
 
   # Extract the package and move the binary to /root
+  echo "解压文件..."
   tar -xzf "/root/${package_name}.tar.gz" -C /root
   mv "/root/${package_name}/sing-box" /root/sbox
 
@@ -104,7 +216,8 @@ download_singbox(){
 
   # Set the permissions
   chown root:root /root/sbox/sing-box
-  chmod +x /root/sbox/sing-box
+  chmod 755 /root/sbox/sing-box
+  echo "sing-box 下载完成"
 }
 
 # download singbox and cloudflared
@@ -123,11 +236,63 @@ download_cloudflared(){
           ;;
   esac
 
+  echo "正在下载 cloudflared..."
   # install cloudflared linux
   cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
-  curl -sLo "/root/sbox/cloudflared-linux" "$cf_url"
-  chmod +x /root/sbox/cloudflared-linux
+  if ! curl -sLo "/root/sbox/cloudflared-linux" "$cf_url"; then
+      echo "错误: cloudflared 下载失败"
+      exit 1
+  fi
+  chmod 755 /root/sbox/cloudflared-linux
+  echo "cloudflared 下载完成"
   echo ""
+}
+
+# Create cloudflared systemd service
+create_cloudflared_service(){
+  local vmess_port="$1"
+  
+  cat > /etc/systemd/system/cloudflared.service <<EOF
+[Unit]
+Description=Cloudflared Tunnel
+After=network.target sing-box.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=singbox
+Group=singbox
+ExecStartPre=/bin/sleep 3
+ExecStart=/root/sbox/cloudflared-linux tunnel --url http://localhost:${vmess_port} --no-autoupdate --edge-ip-version auto --protocol h2mux --logfile /var/log/cloudflared.log
+ExecStartPost=/bin/bash -c 'sleep 8 && grep -oP "https://\\K[^\\s]+" /var/log/cloudflared.log | head -1 | base64 > /root/sbox/argo.txt.b64 && chmod 600 /root/sbox/argo.txt.b64'
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/cloudflared.log
+StandardError=append:/var/log/cloudflared.log
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log /root/sbox
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Create log file with proper permissions
+  touch /var/log/cloudflared.log
+  chown singbox:singbox /var/log/cloudflared.log
+  chmod 644 /var/log/cloudflared.log
 }
 
 
@@ -567,25 +732,41 @@ EOF
 
 }
 uninstall_singbox() {
-            echo "Uninstalling..."
-          # Stop and disable sing-box service
-          systemctl stop sing-box
-          systemctl disable sing-box > /dev/null 2>&1
+          echo "Uninstalling..."
+          # Stop and disable services
+          systemctl stop sing-box cloudflared 2>/dev/null
+          systemctl disable sing-box cloudflared > /dev/null 2>&1
 
+          # Remove service files
+          rm -f /etc/systemd/system/sing-box.service
+          rm -f /etc/systemd/system/cloudflared.service
+          systemctl daemon-reload
+          
           # Remove files
-          rm /etc/systemd/system/sing-box.service
-          rm /root/sbox/sbconfig_server.json
-          rm /root/sbox/sing-box
-          rm /root/sbox/cloudflared-linux
-          rm /root/sbox/argo.txt.b64
-          rm /root/sbox/public.key.b64
-          rm /root/self-cert/private.key
-          rm /root/self-cert/cert.pem
+          rm -f /root/sbox/sbconfig_server.json
+          rm -f /root/sbox/sing-box
+          rm -f /root/sbox/cloudflared-linux
+          rm -f /root/sbox/argo.txt.b64
+          rm -f /root/sbox/public.key.b64
+          rm -f /root/self-cert/private.key
+          rm -f /root/self-cert/cert.pem
+          rm -f /var/log/cloudflared.log
           rm -rf /root/self-cert/
           rm -rf /root/sbox/
+          
+          # Remove user (optional, commented out for safety)
+          # userdel singbox 2>/dev/null
+          
           echo "DONE!"
 }
 install_base
+
+# Check root privileges
+if [ "$EUID" -ne 0 ]; then 
+    echo "错误: 此脚本需要 root 权限运行"
+    echo "请使用: sudo bash $0"
+    exit 1
+fi
 
 # Check if reality.json, sing-box, and sing-box.service already exist
 if [ -f "/root/sbox/sbconfig_server.json" ] && [ -f "/root/sbox/sing-box" ] && [ -f "/root/sbox/public.key.b64" ] && [ -f "/root/sbox/argo.txt.b64" ] && [ -f "/etc/systemd/system/sing-box.service" ]; then
@@ -760,22 +941,43 @@ echo ""
 read -p "ws路径 (无需加斜杠,默认随机生成): " ws_path
 ws_path=${ws_path:-$(/root/sbox/sing-box generate rand --hex 6)}
 
-pid=$(pgrep -f cloudflared)
-if [ -n "$pid" ]; then
-  # 终止进程
-  kill "$pid"
+# Stop any existing cloudflared process
+systemctl stop cloudflared 2>/dev/null
+pkill -f cloudflared 2>/dev/null
+
+# Create cloudflared service
+create_cloudflared_service "$vmess_port"
+
+# Start cloudflared and wait for tunnel
+echo "启动 cloudflared tunnel..."
+systemctl daemon-reload
+systemctl enable cloudflared > /dev/null 2>&1
+systemctl start cloudflared
+
+echo "等待 cloudflare argo 生成地址..."
+sleep 10
+
+# Read argo domain from file
+if [ -f "/root/sbox/argo.txt.b64" ]; then
+    argo=$(base64 --decode /root/sbox/argo.txt.b64)
+    if [ -z "$argo" ]; then
+        echo "警告: argo 地址为空，尝试从日志读取..."
+        sleep 5
+        argo=$(grep -oP "https://\K[^\s]+" /var/log/cloudflared.log 2>/dev/null | head -1)
+        if [ -n "$argo" ]; then
+            echo "$argo" | base64 > /root/sbox/argo.txt.b64
+            chmod 600 /root/sbox/argo.txt.b64
+        else
+            echo "错误: 无法获取 argo 地址"
+            exit 1
+        fi
+    fi
+else
+    echo "错误: 无法找到 argo 地址文件"
+    exit 1
 fi
 
-#生成地址
-/root/sbox/cloudflared-linux tunnel --url http://localhost:$vmess_port --no-autoupdate --edge-ip-version auto --protocol h2mux>argo.log 2>&1 &
-sleep 2
-clear
-echo 等待cloudflare argo生成地址
-sleep 5
-#连接到域名
-argo=$(cat argo.log | grep trycloudflare.com | awk 'NR==2{print}' | awk -F// '{print $2}' | awk '{print $1}')
-echo "$argo" | base64 > /root/sbox/argo.txt.b64
-rm -rf argo.log
+echo "Cloudflared tunnel 地址: $argo"
 
 
 # Retrieve the server IP address
@@ -864,13 +1066,24 @@ jq -n --arg listen_port "$listen_port" --arg vmess_port "$vmess_port" --arg vmes
 
 
 
-# Create sing-box.service
+# Create dedicated user
+create_singbox_user
+
+# Set secure permissions
+set_secure_permissions
+
+# Create sing-box.service with dedicated user
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
 After=network.target nss-lookup.target
+Wants=network.target
 
 [Service]
-User=root
+Type=simple
+User=singbox
+Group=singbox
 WorkingDirectory=/root
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
@@ -878,7 +1091,24 @@ ExecStart=/root/sbox/sing-box run -c /root/sbox/sbconfig_server.json
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10
+RestartPreventExitStatus=23
 LimitNOFILE=infinity
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/root
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target
@@ -891,11 +1121,24 @@ if /root/sbox/sing-box check -c /root/sbox/sbconfig_server.json; then
     systemctl daemon-reload
     systemctl enable sing-box > /dev/null 2>&1
     systemctl start sing-box
-    systemctl restart sing-box
-
-    show_client_configuration
-
-
+    
+    # Wait for sing-box to start
+    sleep 2
+    
+    # Check if services are running
+    if systemctl is-active --quiet sing-box && systemctl is-active --quiet cloudflared; then
+        echo "✓ 所有服务启动成功"
+        show_client_configuration
+    else
+        echo "警告: 部分服务可能未正常启动"
+        echo "sing-box 状态: $(systemctl is-active sing-box)"
+        echo "cloudflared 状态: $(systemctl is-active cloudflared)"
+        echo ""
+        echo "请检查日志:"
+        echo "  journalctl -u sing-box -n 50"
+        echo "  journalctl -u cloudflared -n 50"
+    fi
 else
     echo "Error in configuration. Aborting"
+    exit 1
 fi
