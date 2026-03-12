@@ -559,16 +559,16 @@ show_client_configuration() {
   show_notice "vmess ws 通用链接参数" 
   echo ""
   echo ""
-  echo "以下为vmess链接，替换speed.cloudflare.com为自己的优选ip可获得极致体验"
+  echo "以下为vmess链接，替换104.16.128.1为自己的优选ip可获得极致体验"
   echo ""
   echo ""
-  echo 'vmess://'$(echo '{"add":"speed.cloudflare.com","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"/'$ws_path'","port":"443","ps":"sing-box-vmess-tls","tls":"tls","type":"none","v":"2"}' | base64 -w 0)
+  echo 'vmess://'$(echo '{"add":"104.16.128.1","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"/'$ws_path'","port":"443","ps":"sing-box-vmess-tls","tls":"tls","type":"none","v":"2"}' | base64 -w 0)
   echo ""
   echo ""
   echo -e "端口 443 可改为 2053 2083 2087 2096 8443"
   echo ""
   echo ""
-  echo 'vmess://'$(echo '{"add":"speed.cloudflare.com","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"/'$ws_path'","port":"80","ps":"sing-box-vmess","tls":"","type":"none","v":"2"}' | base64 -w 0)
+  echo 'vmess://'$(echo '{"add":"104.16.128.1","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"/'$ws_path'","port":"80","ps":"sing-box-vmess","tls":"","type":"none","v":"2"}' | base64 -w 0)
   echo ""
   echo ""
   echo -e "端口 80 可改为 8080 8880 2052 2082 2086 2095" 
@@ -578,13 +578,13 @@ show_client_configuration() {
   if [ -n "$vless_ws_uuid" ]; then
     show_notice "VLESS WS 通用链接参数"
     echo ""
-    echo "以下为vless ws链接，替换speed.cloudflare.com为自己的优选ip可获得极致体验"
+    echo "以下为vless ws链接，替换104.16.128.1为自己的优选ip可获得极致体验"
     echo ""
-    echo "vless://$vless_ws_uuid@speed.cloudflare.com:443?encryption=none&security=tls&sni=$argo&type=ws&host=$argo&path=%2F$vless_ws_path#sing-box-vless-ws-tls"
+    echo "vless://$vless_ws_uuid@104.16.128.1:443?encryption=none&security=tls&sni=$argo&type=ws&host=$argo&path=%2F$vless_ws_path#sing-box-vless-ws-tls"
     echo ""
     echo -e "端口 443 可改为 2053 2083 2087 2096 8443"
     echo ""
-    echo "vless://$vless_ws_uuid@speed.cloudflare.com:80?encryption=none&security=none&type=ws&host=$argo&path=%2F$vless_ws_path#sing-box-vless-ws"
+    echo "vless://$vless_ws_uuid@104.16.128.1:80?encryption=none&security=none&type=ws&host=$argo&path=%2F$vless_ws_path#sing-box-vless-ws"
     echo ""
     echo -e "端口 80 可改为 8080 8880 2052 2082 2086 2095"
     echo ""
@@ -651,7 +651,7 @@ proxies:
       - h3
   - name: Vmess
     type: vmess
-    server: speed.cloudflare.com
+    server: 104.16.128.1
     port: 443
     uuid: $vmess_uuid
     alterId: 0
@@ -668,7 +668,7 @@ proxies:
         Host: $argo
   - name: VLESS-WS
     type: vless
-    server: speed.cloudflare.com
+    server: 104.16.128.1
     port: 443
     uuid: $vless_ws_uuid
     udp: true
@@ -862,7 +862,7 @@ cat << EOF
             }
         },
         {
-            "server": "speed.cloudflare.com",
+            "server": "104.16.128.1",
             "server_port": 443,
             "tag": "sing-box-vmess",
             "tls": {
@@ -888,7 +888,7 @@ cat << EOF
             "uuid": "$vmess_uuid"
         },
         {
-            "server": "speed.cloudflare.com",
+            "server": "104.16.128.1",
             "server_port": 443,
             "tag": "sing-box-vless-ws",
             "tls": {
