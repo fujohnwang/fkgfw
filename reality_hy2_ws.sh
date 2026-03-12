@@ -334,10 +334,29 @@ download_cloudflared(){
 # Create cloudflared systemd service
 create_cloudflared_service(){
   local vmess_port="$1"
+  local vless_ws_port="$2"
+  local vmess_path="$3"
+  local vless_ws_path="$4"
   
   # Create directory for argo file
   mkdir -p /etc/sing-box
-  
+
+  # Ensure paths start with /
+  [[ $vmess_path != /* ]] && vmess_path="/$vmess_path"
+  [[ $vless_ws_path != /* ]] && vless_ws_path="/$vless_ws_path"
+
+  # Create cloudflared ingress config (multi-path routing)
+  cat > /etc/sing-box/cloudflared_config.yml <<CFEOF
+ingress:
+  - path: ${vmess_path}
+    service: http://localhost:${vmess_port}
+  - path: ${vless_ws_path}
+    service: http://localhost:${vless_ws_port}
+  - service: http_status:404
+CFEOF
+  chown singbox:singbox /etc/sing-box/cloudflared_config.yml
+  chmod 600 /etc/sing-box/cloudflared_config.yml
+
   # Create a helper script for ExecStartPost to avoid escaping issues
   cat > /usr/local/bin/cloudflared-post-start.sh <<'SCRIPT'
 #!/bin/bash
@@ -359,7 +378,7 @@ Type=simple
 User=singbox
 Group=singbox
 ExecStartPre=/bin/sleep 3
-ExecStart=/usr/local/bin/cloudflared tunnel --url http://localhost:${vmess_port} --no-autoupdate --edge-ip-version auto --protocol h2mux --logfile /var/log/cloudflared.log
+ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/sing-box/cloudflared_config.yml --no-autoupdate --edge-ip-version auto --protocol h2mux --logfile /var/log/cloudflared.log
 ExecStartPost=/usr/local/bin/cloudflared-post-start.sh
 Restart=on-failure
 RestartSec=10
@@ -465,25 +484,46 @@ show_client_configuration() {
 
   argo=$(base64 --decode /etc/sing-box/argo.txt.b64)
   vmess_uuid=$(jq -r '.inbounds[2].users[0].uuid' /etc/sing-box/config.json)
-  ws_path=$(jq -r '.inbounds[2].transport.path' /etc/sing-box/config.json)
+  ws_path=$(jq -r '.inbounds[2].transport.path' /etc/sing-box/config.json | sed 's|^\/||')
+
+  # VLESS-WS (inbounds[3])
+  vless_ws_uuid=$(jq -r '.inbounds[3].users[0].uuid // empty' /etc/sing-box/config.json)
+  vless_ws_path=$(jq -r '.inbounds[3].transport.path // empty' /etc/sing-box/config.json | sed 's|^\/||')
+
   show_notice "vmess ws 通用链接参数" 
   echo ""
   echo ""
   echo "以下为vmess链接，替换speed.cloudflare.com为自己的优选ip可获得极致体验"
   echo ""
   echo ""
-  echo 'vmess://'$(echo '{"add":"speed.cloudflare.com","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"'$ws_path'","port":"443","ps":"sing-box-vmess-tls","tls":"tls","type":"none","v":"2"}' | base64 -w 0)
+  echo 'vmess://'$(echo '{"add":"speed.cloudflare.com","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"/'$ws_path'","port":"443","ps":"sing-box-vmess-tls","tls":"tls","type":"none","v":"2"}' | base64 -w 0)
   echo ""
   echo ""
   echo -e "端口 443 可改为 2053 2083 2087 2096 8443"
   echo ""
   echo ""
-  echo 'vmess://'$(echo '{"add":"speed.cloudflare.com","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"'$ws_path'","port":"80","ps":"sing-box-vmess","tls":"","type":"none","v":"2"}' | base64 -w 0)
+  echo 'vmess://'$(echo '{"add":"speed.cloudflare.com","aid":"0","host":"'$argo'","id":"'$vmess_uuid'","net":"ws","path":"/'$ws_path'","port":"80","ps":"sing-box-vmess","tls":"","type":"none","v":"2"}' | base64 -w 0)
   echo ""
   echo ""
   echo -e "端口 80 可改为 8080 8880 2052 2082 2086 2095" 
   echo ""
   echo ""
+
+  if [ -n "$vless_ws_uuid" ]; then
+    show_notice "VLESS WS 通用链接参数"
+    echo ""
+    echo "以下为vless ws链接，替换speed.cloudflare.com为自己的优选ip可获得极致体验"
+    echo ""
+    echo "vless://$vless_ws_uuid@speed.cloudflare.com:443?encryption=none&security=tls&sni=$argo&type=ws&host=$argo&path=%2F$vless_ws_path#sing-box-vless-ws-tls"
+    echo ""
+    echo -e "端口 443 可改为 2053 2083 2087 2096 8443"
+    echo ""
+    echo "vless://$vless_ws_uuid@speed.cloudflare.com:80?encryption=none&security=none&type=ws&host=$argo&path=%2F$vless_ws_path#sing-box-vless-ws"
+    echo ""
+    echo -e "端口 80 可改为 8080 8880 2052 2082 2086 2095"
+    echo ""
+    echo ""
+  fi
   show_notice "clash-meta配置参数"
 cat << EOF
 
@@ -557,7 +597,22 @@ proxies:
     servername: $argo
     network: ws
     ws-opts:
-      path: $ws_path
+      path: /$ws_path
+      headers:
+        Host: $argo
+  - name: VLESS-WS
+    type: vless
+    server: speed.cloudflare.com
+    port: 443
+    uuid: $vless_ws_uuid
+    udp: true
+    tls: true
+    client-fingerprint: chrome
+    skip-cert-verify: true
+    servername: $argo
+    network: ws
+    ws-opts:
+      path: /$vless_ws_path
       headers:
         Host: $argo
 
@@ -569,6 +624,7 @@ proxy-groups:
       - Reality
       - Hysteria2
       - Vmess
+      - VLESS-WS
       - DIRECT
 
   - name: 自动选择
@@ -577,6 +633,7 @@ proxy-groups:
       - Reality
       - Hysteria2
       - Vmess
+      - VLESS-WS
     url: "http://www.gstatic.com/generate_204"
     interval: 300
     tolerance: 50
@@ -694,7 +751,8 @@ cat << EOF
         "urltest",
         "sing-box-reality",
         "sing-box-hysteria2",
-        "sing-box-vmess"
+        "sing-box-vmess",
+        "sing-box-vless-ws"
       ]
     },
     {
@@ -756,12 +814,37 @@ cat << EOF
                         "$argo"
                     ]
                 },
-                "path": "$ws_path",
+                "path": "/$ws_path",
                 "type": "ws"
             },
             "type": "vmess",
             "security": "auto",
             "uuid": "$vmess_uuid"
+        },
+        {
+            "server": "speed.cloudflare.com",
+            "server_port": 443,
+            "tag": "sing-box-vless-ws",
+            "tls": {
+                "enabled": true,
+                "server_name": "$argo",
+                "insecure": true,
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                }
+            },
+            "transport": {
+                "headers": {
+                    "Host": [
+                        "$argo"
+                    ]
+                },
+                "path": "/$vless_ws_path",
+                "type": "ws"
+            },
+            "type": "vless",
+            "uuid": "$vless_ws_uuid"
         },
     {
       "tag": "direct",
@@ -781,7 +864,8 @@ cat << EOF
       "outbounds": [
         "sing-box-reality",
         "sing-box-hysteria2",
-        "sing-box-vmess"
+        "sing-box-vmess",
+        "sing-box-vless-ws"
       ]
     }
   ],
@@ -1048,15 +1132,28 @@ vmess_uuid=$(/usr/local/bin/sing-box generate uuid)
 read -p "请输入vmess端口，默认为18443(和tunnel通信用不会暴露在外): " vmess_port
 vmess_port=${vmess_port:-18443}
 echo ""
-read -p "ws路径 (无需加斜杠,默认随机生成): " ws_path
+read -p "vmess ws路径 (无需加斜杠,默认随机生成): " ws_path
 ws_path=${ws_path:-$(/usr/local/bin/sing-box generate rand --hex 6)}
+ws_path=$(echo "$ws_path" | sed 's|^\/||')
+
+echo ""
+# vless ws
+echo "开始配置VLESS WS (Argo)"
+echo ""
+vless_ws_uuid=$(/usr/local/bin/sing-box generate uuid)
+read -p "请输入vless ws端口，默认为18444(和tunnel通信用不会暴露在外): " vless_ws_port
+vless_ws_port=${vless_ws_port:-18444}
+echo ""
+read -p "vless ws路径 (无需加斜杠,默认随机生成): " vless_ws_path
+vless_ws_path=${vless_ws_path:-$(/usr/local/bin/sing-box generate rand --hex 6)}
+vless_ws_path=$(echo "$vless_ws_path" | sed 's|^\/||')
 
 # Stop any existing cloudflared process
 systemctl stop cloudflared 2>/dev/null
 pkill -f cloudflared 2>/dev/null
 
-# Create cloudflared service
-create_cloudflared_service "$vmess_port"
+# Create cloudflared service (multi-path ingress)
+create_cloudflared_service "$vmess_port" "$vless_ws_port" "$ws_path" "$vless_ws_path"
 
 # Start cloudflared and wait for tunnel
 echo "启动 cloudflared tunnel..."
@@ -1095,8 +1192,8 @@ echo "Cloudflared tunnel 地址: $argo"
 # Retrieve the server IP address
 server_ip=$(curl -s4m8 ip.sb -k) || server_ip=$(curl -s6m8 ip.sb -k)
 
-# Create reality.json using jq
-jq -n --arg listen_port "$listen_port" --arg vmess_port "$vmess_port" --arg vmess_uuid "$vmess_uuid"  --arg ws_path "$ws_path" --arg server_name "$server_name" --arg private_key "$private_key" --arg short_id "$short_id" --arg uuid "$uuid" --arg hy_listen_port "$hy_listen_port" --arg hy_password "$hy_password" --arg server_ip "$server_ip" '{
+# Create server config.json using jq
+jq -n --arg listen_port "$listen_port" --arg vmess_port "$vmess_port" --arg vmess_uuid "$vmess_uuid" --arg ws_path "/$ws_path" --arg vless_ws_port "$vless_ws_port" --arg vless_ws_uuid "$vless_ws_uuid" --arg vless_ws_path "/$vless_ws_path" --arg server_name "$server_name" --arg private_key "$private_key" --arg short_id "$short_id" --arg uuid "$uuid" --arg hy_listen_port "$hy_listen_port" --arg hy_password "$hy_password" --arg server_ip "$server_ip" '{
   "log": {
     "disabled": false,
     "level": "info",
@@ -1161,6 +1258,21 @@ jq -n --arg listen_port "$listen_port" --arg vmess_port "$vmess_port" --arg vmes
         "transport": {
             "type": "ws",
             "path": $ws_path
+        }
+    },
+    {
+        "type": "vless",
+        "tag": "vless-ws-in",
+        "listen": "::",
+        "listen_port": ($vless_ws_port | tonumber),
+        "users": [
+            {
+                "uuid": $vless_ws_uuid
+            }
+        ],
+        "transport": {
+            "type": "ws",
+            "path": $vless_ws_path
         }
     }
   ],
