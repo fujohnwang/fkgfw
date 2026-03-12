@@ -47,6 +47,14 @@ show_notice() {
 # Introduction animation
 echo ""
 echo ""
+
+# Check root privileges FIRST
+if [ "$EUID" -ne 0 ]; then 
+    echo "错误: 此脚本需要 root 权限运行"
+    echo "请使用: sudo bash $0"
+    exit 1
+fi
+
 # install base
 install_base(){
   # Check if jq is installed, and install it if not
@@ -106,26 +114,34 @@ verify_checksum(){
 set_secure_permissions(){
   echo "设置安全文件权限..."
   
+  # Create and protect sing-box config directory
+  mkdir -p /etc/sing-box
+  chown singbox:singbox /etc/sing-box
+  chmod 755 /etc/sing-box
+  
   # Protect configuration files
-  if [ -f "/root/sbox/sbconfig_server.json" ]; then
-      chmod 600 /root/sbox/sbconfig_server.json
-      chown singbox:singbox /root/sbox/sbconfig_server.json 2>/dev/null || chown root:root /root/sbox/sbconfig_server.json
+  if [ -f "/etc/sing-box/config.json" ]; then
+      chmod 600 /etc/sing-box/config.json
+      chown singbox:singbox /etc/sing-box/config.json
   fi
   
   # Protect key files
-  if [ -f "/root/sbox/public.key.b64" ]; then
-      chmod 600 /root/sbox/public.key.b64
+  if [ -f "/etc/sing-box/public.key.b64" ]; then
+      chmod 600 /etc/sing-box/public.key.b64
+      chown singbox:singbox /etc/sing-box/public.key.b64
   fi
   
-  if [ -f "/root/sbox/argo.txt.b64" ]; then
-      chmod 600 /root/sbox/argo.txt.b64
+  if [ -f "/etc/sing-box/argo.txt.b64" ]; then
+      chmod 600 /etc/sing-box/argo.txt.b64
+      chown singbox:singbox /etc/sing-box/argo.txt.b64
   fi
   
   # Protect certificate directory
-  if [ -d "/root/self-cert" ]; then
-      chmod 700 /root/self-cert
-      chmod 600 /root/self-cert/*.pem 2>/dev/null
-      chmod 600 /root/self-cert/*.key 2>/dev/null
+  if [ -d "/etc/sing-box/certs" ]; then
+      chmod 700 /etc/sing-box/certs
+      chown -R singbox:singbox /etc/sing-box/certs
+      chmod 600 /etc/sing-box/certs/*.pem 2>/dev/null || true
+      chmod 600 /etc/sing-box/certs/*.key 2>/dev/null || true
   fi
   
   echo "文件权限设置完成"
@@ -134,14 +150,15 @@ set_secure_permissions(){
 regenarte_cloudflared_argo(){
   echo "重启 cloudflared 服务..."
   systemctl restart cloudflared
-  sleep 5
+  sleep 10
   
   # Read argo domain from file
-  if [ -f "/root/sbox/argo.txt.b64" ]; then
-      argo=$(base64 --decode /root/sbox/argo.txt.b64)
+  if [ -f "/etc/sing-box/argo.txt.b64" ]; then
+      argo=$(base64 --decode /etc/sing-box/argo.txt.b64)
       echo "Cloudflared tunnel 地址: $argo"
   else
       echo "错误: 无法找到 argo 地址文件"
+      echo "请检查日志: journalctl -u cloudflared -n 50"
       return 1
   fi
 }
@@ -177,10 +194,23 @@ download_singbox(){
   
   echo "正在下载 sing-box..."
   # Download the latest release package (.tar.gz) from GitHub
-  if ! curl -sLo "/root/${package_name}.tar.gz" "$url"; then
-      echo "错误: 下载失败"
-      exit 1
-  fi
+  max_retries=3
+  retry_count=0
+  while [ $retry_count -lt $max_retries ]; do
+      if curl -sL --fail --connect-timeout 30 --max-time 300 -o "/root/${package_name}.tar.gz" "$url"; then
+          break
+      else
+          retry_count=$((retry_count + 1))
+          if [ $retry_count -lt $max_retries ]; then
+              echo "下载失败，重试 $retry_count/$max_retries..."
+              sleep 3
+          else
+              echo "错误: sing-box 下载失败（已重试 $max_retries 次）"
+              echo "URL: $url"
+              exit 1
+          fi
+      fi
+  done
 
   # Try to download and verify checksum
   echo "尝试验证文件完整性..."
@@ -206,17 +236,26 @@ download_singbox(){
       echo "      建议: 手动验证文件来源的可信度"
   fi
 
-  # Extract the package and move the binary to /root
+  # Extract the package and move the binary to /usr/local/bin
   echo "解压文件..."
   tar -xzf "/root/${package_name}.tar.gz" -C /root
-  mv "/root/${package_name}/sing-box" /root/sbox
+  
+  # Ensure /usr/local/bin exists
+  mkdir -p /usr/local/bin
+  
+  mv "/root/${package_name}/sing-box" /usr/local/bin/sing-box
 
   # Cleanup the package
   rm -r "/root/${package_name}.tar.gz" "/root/${package_name}"
 
   # Set the permissions
-  chown root:root /root/sbox/sing-box
-  chmod 755 /root/sbox/sing-box
+  chown root:root /usr/local/bin/sing-box
+  chmod 755 /usr/local/bin/sing-box
+  
+  # Set capabilities to allow binding privileged ports
+  echo "设置 sing-box capabilities..."
+  setcap 'cap_net_bind_service=+ep' /usr/local/bin/sing-box
+  
   echo "sing-box 下载完成"
 }
 
@@ -237,20 +276,77 @@ download_cloudflared(){
   esac
 
   echo "正在下载 cloudflared..."
+  
+  # Ensure /usr/local/bin exists
+  mkdir -p /usr/local/bin
+  
+  # Check if cloudflared is running and stop it
+  if [ -f "/usr/local/bin/cloudflared" ]; then
+      echo "检测到已存在的 cloudflared，停止相关进程..."
+      systemctl stop cloudflared 2>/dev/null || true
+      pkill -9 cloudflared 2>/dev/null || true
+      sleep 2
+      # Remove old file
+      rm -f /usr/local/bin/cloudflared
+  fi
+  
   # install cloudflared linux
   cf_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}"
-  if ! curl -sLo "/root/sbox/cloudflared-linux" "$cf_url"; then
-      echo "错误: cloudflared 下载失败"
-      exit 1
-  fi
-  chmod 755 /root/sbox/cloudflared-linux
-  echo "cloudflared 下载完成"
+  
+  # Download to temp location first
+  temp_file="/tmp/cloudflared.tmp.$$"
+  
+  # Try download with retry (show progress, not silent)
+  max_retries=3
+  retry_count=0
+  while [ $retry_count -lt $max_retries ]; do
+      echo "尝试下载 ($((retry_count + 1))/$max_retries)..."
+      if curl -L --fail --connect-timeout 30 --max-time 300 --progress-bar -o "$temp_file" "$cf_url" 2>&1; then
+          echo "✓ cloudflared 下载完成"
+          # Move to final location
+          mv "$temp_file" /usr/local/bin/cloudflared
+          chown root:root /usr/local/bin/cloudflared
+          chmod 755 /usr/local/bin/cloudflared
+          echo ""
+          return 0
+      else
+          retry_count=$((retry_count + 1))
+          rm -f "$temp_file"
+          if [ $retry_count -lt $max_retries ]; then
+              echo "✗ 下载失败，3秒后重试..."
+              sleep 3
+          fi
+      fi
+  done
+  
   echo ""
+  echo "错误: cloudflared 下载失败（已重试 $max_retries 次）"
+  echo "URL: $cf_url"
+  echo ""
+  echo "请尝试手动下载并放置到正确位置："
+  echo "  sudo curl -L -o /usr/local/bin/cloudflared $cf_url"
+  echo "  sudo chmod 755 /usr/local/bin/cloudflared"
+  echo ""
+  echo "然后重新运行脚本"
+  exit 1
 }
 
 # Create cloudflared systemd service
 create_cloudflared_service(){
   local vmess_port="$1"
+  
+  # Create directory for argo file
+  mkdir -p /etc/sing-box
+  
+  # Create a helper script for ExecStartPost to avoid escaping issues
+  cat > /usr/local/bin/cloudflared-post-start.sh <<'SCRIPT'
+#!/bin/bash
+sleep 8
+grep -oP "https://[a-z0-9-]+\.trycloudflare\.com" /var/log/cloudflared.log | head -1 | sed 's|https://||' | base64 > /etc/sing-box/argo.txt.b64
+chown singbox:singbox /etc/sing-box/argo.txt.b64
+chmod 600 /etc/sing-box/argo.txt.b64
+SCRIPT
+  chmod 755 /usr/local/bin/cloudflared-post-start.sh
   
   cat > /etc/systemd/system/cloudflared.service <<EOF
 [Unit]
@@ -263,8 +359,8 @@ Type=simple
 User=singbox
 Group=singbox
 ExecStartPre=/bin/sleep 3
-ExecStart=/root/sbox/cloudflared-linux tunnel --url http://localhost:${vmess_port} --no-autoupdate --edge-ip-version auto --protocol h2mux --logfile /var/log/cloudflared.log
-ExecStartPost=/bin/bash -c 'sleep 8 && grep -oP "https://\\K[^\\s]+" /var/log/cloudflared.log | head -1 | base64 > /root/sbox/argo.txt.b64 && chmod 600 /root/sbox/argo.txt.b64'
+ExecStart=/usr/local/bin/cloudflared tunnel --url http://localhost:${vmess_port} --no-autoupdate --edge-ip-version auto --protocol h2mux --logfile /var/log/cloudflared.log
+ExecStartPost=/usr/local/bin/cloudflared-post-start.sh
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:/var/log/cloudflared.log
@@ -274,7 +370,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/log /root/sbox
+ReadWritePaths=/var/log /etc/sing-box
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -293,21 +389,25 @@ EOF
   touch /var/log/cloudflared.log
   chown singbox:singbox /var/log/cloudflared.log
   chmod 644 /var/log/cloudflared.log
+  
+  # Set permissions for sing-box config directory
+  chown singbox:singbox /etc/sing-box
+  chmod 755 /etc/sing-box
 }
 
 
 # client configuration
 show_client_configuration() {
   # Get current listen port
-  current_listen_port=$(jq -r '.inbounds[0].listen_port' /root/sbox/sbconfig_server.json)
+  current_listen_port=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
   # Get current server name
-  current_server_name=$(jq -r '.inbounds[0].tls.server_name' /root/sbox/sbconfig_server.json)
+  current_server_name=$(jq -r '.inbounds[0].tls.server_name' /etc/sing-box/config.json)
   # Get the UUID
-  uuid=$(jq -r '.inbounds[0].users[0].uuid' /root/sbox/sbconfig_server.json)
+  uuid=$(jq -r '.inbounds[0].users[0].uuid' /etc/sing-box/config.json)
   # Get the public key from the file, decoding it from base64
-  public_key=$(base64 --decode /root/sbox/public.key.b64)
+  public_key=$(base64 --decode /etc/sing-box/public.key.b64)
   # Get the short ID
-  short_id=$(jq -r '.inbounds[0].tls.reality.short_id[0]' /root/sbox/sbconfig_server.json)
+  short_id=$(jq -r '.inbounds[0].tls.reality.short_id[0]' /etc/sing-box/config.json)
   # Retrieve the server IP address
   server_ip=$(curl -s4m8 ip.sb -k) || server_ip=$(curl -s6m8 ip.sb -k)
   echo ""
@@ -334,11 +434,11 @@ show_client_configuration() {
   echo ""
   echo ""
   # Get current listen port
-  hy_current_listen_port=$(jq -r '.inbounds[1].listen_port' /root/sbox/sbconfig_server.json)
+  hy_current_listen_port=$(jq -r '.inbounds[1].listen_port' /etc/sing-box/config.json)
   # Get current server name
-  hy_current_server_name=$(openssl x509 -in /root/self-cert/cert.pem -noout -subject -nameopt RFC2253 | awk -F'=' '{print $NF}')
+  hy_current_server_name=$(openssl x509 -in /etc/sing-box/certs/cert.pem -noout -subject -nameopt RFC2253 | awk -F'=' '{print $NF}')
   # Get the password
-  hy_password=$(jq -r '.inbounds[1].users[0].password' /root/sbox/sbconfig_server.json)
+  hy_password=$(jq -r '.inbounds[1].users[0].password' /etc/sing-box/config.json)
   # Generate the link
   
   hy2_server_link="hysteria2://$hy_password@$server_ip:$hy_current_listen_port?insecure=1&sni=$hy_current_server_name"
@@ -363,9 +463,9 @@ show_client_configuration() {
   echo ""
 
 
-  argo=$(base64 --decode /root/sbox/argo.txt.b64)
-  vmess_uuid=$(jq -r '.inbounds[2].users[0].uuid' /root/sbox/sbconfig_server.json)
-  ws_path=$(jq -r '.inbounds[2].transport.path' /root/sbox/sbconfig_server.json)
+  argo=$(base64 --decode /etc/sing-box/argo.txt.b64)
+  vmess_uuid=$(jq -r '.inbounds[2].users[0].uuid' /etc/sing-box/config.json)
+  ws_path=$(jq -r '.inbounds[2].transport.path' /etc/sing-box/config.json)
   show_notice "vmess ws 通用链接参数" 
   echo ""
   echo ""
@@ -742,17 +842,13 @@ uninstall_singbox() {
           rm -f /etc/systemd/system/cloudflared.service
           systemctl daemon-reload
           
-          # Remove files
-          rm -f /root/sbox/sbconfig_server.json
-          rm -f /root/sbox/sing-box
-          rm -f /root/sbox/cloudflared-linux
-          rm -f /root/sbox/argo.txt.b64
-          rm -f /root/sbox/public.key.b64
-          rm -f /root/self-cert/private.key
-          rm -f /root/self-cert/cert.pem
+          # Remove binaries
+          rm -f /usr/local/bin/sing-box
+          rm -f /usr/local/bin/cloudflared
+          
+          # Remove configuration and data
+          rm -rf /etc/sing-box/
           rm -f /var/log/cloudflared.log
-          rm -rf /root/self-cert/
-          rm -rf /root/sbox/
           
           # Remove user (optional, commented out for safety)
           # userdel singbox 2>/dev/null
@@ -761,15 +857,8 @@ uninstall_singbox() {
 }
 install_base
 
-# Check root privileges
-if [ "$EUID" -ne 0 ]; then 
-    echo "错误: 此脚本需要 root 权限运行"
-    echo "请使用: sudo bash $0"
-    exit 1
-fi
-
 # Check if reality.json, sing-box, and sing-box.service already exist
-if [ -f "/root/sbox/sbconfig_server.json" ] && [ -f "/root/sbox/sing-box" ] && [ -f "/root/sbox/public.key.b64" ] && [ -f "/root/sbox/argo.txt.b64" ] && [ -f "/etc/systemd/system/sing-box.service" ]; then
+if [ -f "/etc/sing-box/config.json" ] && [ -f "/usr/local/bin/sing-box" ] && [ -f "/etc/sing-box/public.key.b64" ] && [ -f "/etc/sing-box/argo.txt.b64" ] && [ -f "/etc/systemd/system/sing-box.service" ]; then
 
     echo "sing-box-reality-hysteria2已经安装"
     echo ""
@@ -788,18 +877,14 @@ if [ -f "/root/sbox/sbconfig_server.json" ] && [ -f "/root/sbox/sing-box" ] && [
         1)
           show_notice "Reinstalling..."
           # Uninstall previous installation
-          systemctl stop sing-box
-          systemctl disable sing-box > /dev/null 2>&1
-          rm /etc/systemd/system/sing-box.service
-          rm /root/sbox/sbconfig_server.json
-          rm /root/sbox/sing-box
-          rm /root/sbox/cloudflared-linux
-          rm /root/sbox/argo.txt.b64
-          rm /root/sbox/public.key.b64
-          rm /root/self-cert/private.key
-          rm /root/self-cert/cert.pem
-          rm -rf /root/self-cert/
-          rm -rf /root/sbox/
+          systemctl stop sing-box cloudflared 2>/dev/null
+          systemctl disable sing-box cloudflared > /dev/null 2>&1
+          rm -f /etc/systemd/system/sing-box.service
+          rm -f /etc/systemd/system/cloudflared.service
+          rm -rf /etc/sing-box/
+          rm -f /usr/local/bin/sing-box
+          rm -f /usr/local/bin/cloudflared
+          rm -f /var/log/cloudflared.log
           
           # Proceed with installation
         ;;
@@ -807,14 +892,14 @@ if [ -f "/root/sbox/sbconfig_server.json" ] && [ -f "/root/sbox/sing-box" ] && [
           #Reality modify
           show_notice "开始修改reality端口号和域名"
           # Get current listen port
-          current_listen_port=$(jq -r '.inbounds[0].listen_port' /root/sbox/sbconfig_server.json)
+          current_listen_port=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
 
           # Ask for listen port
           read -p "请输入想要修改的端口号 (当前端口号为 $current_listen_port): " listen_port
           listen_port=${listen_port:-$current_listen_port}
 
           # Get current server name
-          current_server_name=$(jq -r '.inbounds[0].tls.server_name' /root/sbox/sbconfig_server.json)
+          current_server_name=$(jq -r '.inbounds[0].tls.server_name' /etc/sing-box/config.json)
 
           # Ask for server name (sni)
           read -p "请输入想要偷取的域名 (当前域名为 $current_server_name): " server_name
@@ -824,15 +909,17 @@ if [ -f "/root/sbox/sbconfig_server.json" ] && [ -f "/root/sbox/sing-box" ] && [
           show_notice "开始修改hysteria2端口号"
           echo ""
           # Get current listen port
-          hy_current_listen_port=$(jq -r '.inbounds[1].listen_port' /root/sbox/sbconfig_server.json)
+          hy_current_listen_port=$(jq -r '.inbounds[1].listen_port' /etc/sing-box/config.json)
           
           # Ask for listen port
           read -p "请属于想要修改的端口号 (当前端口号为 $hy_current_listen_port): " hy_listen_port
           hy_listen_port=${hy_listen_port:-$hy_current_listen_port}
 
           # Modify reality.json with new settings
-          jq --arg listen_port "$listen_port" --arg server_name "$server_name" --arg hy_listen_port "$hy_listen_port" '.inbounds[1].listen_port = ($hy_listen_port | tonumber) | .inbounds[0].listen_port = ($listen_port | tonumber) | .inbounds[0].tls.server_name = $server_name | .inbounds[0].tls.reality.handshake.server = $server_name' /root/sbox/sbconfig_server.json > /root/sb_modified.json
-          mv /root/sb_modified.json /root/sbox/sbconfig_server.json
+          jq --arg listen_port "$listen_port" --arg server_name "$server_name" --arg hy_listen_port "$hy_listen_port" '.inbounds[1].listen_port = ($hy_listen_port | tonumber) | .inbounds[0].listen_port = ($listen_port | tonumber) | .inbounds[0].tls.server_name = $server_name | .inbounds[0].tls.reality.handshake.server = $server_name' /etc/sing-box/config.json > /tmp/sb_modified.json
+          mv /tmp/sb_modified.json /etc/sing-box/config.json
+          chmod 600 /etc/sing-box/config.json
+          chown singbox:singbox /etc/sing-box/config.json
 
           # Restart sing-box service
           systemctl restart sing-box
@@ -853,7 +940,7 @@ if [ -f "/root/sbox/sbconfig_server.json" ] && [ -f "/root/sbox/sing-box" ] && [
           show_notice "Update Sing-box..."
           download_singbox
           # Check configuration and start the service
-          if /root/sbox/sing-box check -c /root/sbox/sbconfig_server.json; then
+          if /usr/local/bin/sing-box check -c /etc/sing-box/config.json; then
               echo "Configuration checked successfully. Starting sing-box service..."
               systemctl daemon-reload
               systemctl enable sing-box > /dev/null 2>&1
@@ -876,7 +963,11 @@ if [ -f "/root/sbox/sbconfig_server.json" ] && [ -f "/root/sbox/sing-box" ] && [
 	esac
 	fi
 
-mkdir -p "/root/sbox/"
+mkdir -p "/etc/sing-box"
+mkdir -p "/etc/sing-box/certs"
+
+# Create singbox user first (needed for services and permissions)
+create_singbox_user
 
 download_singbox
 
@@ -888,7 +979,7 @@ echo ""
 # Generate key pair
 echo "自动生成基本参数"
 echo ""
-key_pair=$(/root/sbox/sing-box generate reality-keypair)
+key_pair=$(/usr/local/bin/sing-box generate reality-keypair)
 echo "Key pair生成完成"
 echo ""
 
@@ -897,16 +988,35 @@ private_key=$(echo "$key_pair" | awk '/PrivateKey/ {print $2}' | tr -d '"')
 public_key=$(echo "$key_pair" | awk '/PublicKey/ {print $2}' | tr -d '"')
 
 # Save the public key in a file using base64 encoding
-echo "$public_key" | base64 > /root/sbox/public.key.b64
+echo "$public_key" | base64 > /etc/sing-box/public.key.b64
 
 # Generate necessary values
-uuid=$(/root/sbox/sing-box generate uuid)
-short_id=$(/root/sbox/sing-box generate rand --hex 8)
+uuid=$(/usr/local/bin/sing-box generate uuid)
+short_id=$(/usr/local/bin/sing-box generate rand --hex 8)
 echo "uuid和短id 生成完成"
 echo ""
 # Ask for listen port
 read -p "请输入Reality端口号 (default: 443): " listen_port
 listen_port=${listen_port:-443}
+
+# Check if port is already in use
+if netstat -tuln 2>/dev/null | grep -q ":${listen_port} " || ss -tuln 2>/dev/null | grep -q ":${listen_port} "; then
+    echo ""
+    echo "警告: 端口 $listen_port 已被占用"
+    echo "正在检查占用进程..."
+    lsof -i :${listen_port} 2>/dev/null || ss -tulnp | grep ":${listen_port} "
+    echo ""
+    read -p "是否要停止占用该端口的进程并继续? (yes/no): " kill_process
+    if [ "$kill_process" = "yes" ]; then
+        fuser -k ${listen_port}/tcp 2>/dev/null || true
+        sleep 2
+        echo "已尝试释放端口 $listen_port"
+    else
+        echo "请选择其他端口或手动停止占用进程后重试"
+        exit 1
+    fi
+fi
+
 echo ""
 # Ask for server name (sni)
 read -p "请输入想要偷取的域名 (default: itunes.apple.com): " server_name
@@ -916,7 +1026,7 @@ echo ""
 echo "开始配置hysteria2"
 echo ""
 # Generate hysteria necessary values
-hy_password=$(/root/sbox/sing-box generate rand --hex 8)
+hy_password=$(/usr/local/bin/sing-box generate rand --hex 8)
 
 # Ask for listen port
 read -p "请输入hysteria2监听端口 (default: 8443): " hy_listen_port
@@ -926,7 +1036,7 @@ echo ""
 # Ask for self-signed certificate domain
 read -p "输入自签证书域名 (default: bing.com): " hy_server_name
 hy_server_name=${hy_server_name:-bing.com}
-mkdir -p /root/self-cert/ && openssl ecparam -genkey -name prime256v1 -out /root/self-cert/private.key && openssl req -new -x509 -days 36500 -key /root/self-cert/private.key -out /root/self-cert/cert.pem -subj "/CN=${hy_server_name}"
+mkdir -p /etc/sing-box/certs && openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/private.key && openssl req -new -x509 -days 36500 -key /etc/sing-box/certs/private.key -out /etc/sing-box/certs/cert.pem -subj "/CN=${hy_server_name}"
 echo ""
 echo "自签证书生成完成"
 echo ""
@@ -934,12 +1044,12 @@ echo ""
 echo "开始配置vmess"
 echo ""
 # Generate hysteria necessary values
-vmess_uuid=$(/root/sbox/sing-box generate uuid)
+vmess_uuid=$(/usr/local/bin/sing-box generate uuid)
 read -p "请输入vmess端口，默认为18443(和tunnel通信用不会暴露在外): " vmess_port
 vmess_port=${vmess_port:-18443}
 echo ""
 read -p "ws路径 (无需加斜杠,默认随机生成): " ws_path
-ws_path=${ws_path:-$(/root/sbox/sing-box generate rand --hex 6)}
+ws_path=${ws_path:-$(/usr/local/bin/sing-box generate rand --hex 6)}
 
 # Stop any existing cloudflared process
 systemctl stop cloudflared 2>/dev/null
@@ -958,17 +1068,19 @@ echo "等待 cloudflare argo 生成地址..."
 sleep 10
 
 # Read argo domain from file
-if [ -f "/root/sbox/argo.txt.b64" ]; then
-    argo=$(base64 --decode /root/sbox/argo.txt.b64)
+if [ -f "/etc/sing-box/argo.txt.b64" ]; then
+    argo=$(base64 --decode /etc/sing-box/argo.txt.b64)
     if [ -z "$argo" ]; then
         echo "警告: argo 地址为空，尝试从日志读取..."
         sleep 5
-        argo=$(grep -oP "https://\K[^\s]+" /var/log/cloudflared.log 2>/dev/null | head -1)
+        argo=$(grep -oP "https://[a-z0-9-]+\.trycloudflare\.com" /var/log/cloudflared.log 2>/dev/null | head -1 | sed 's|https://||')
         if [ -n "$argo" ]; then
-            echo "$argo" | base64 > /root/sbox/argo.txt.b64
-            chmod 600 /root/sbox/argo.txt.b64
+            echo "$argo" | base64 > /etc/sing-box/argo.txt.b64
+            chmod 600 /etc/sing-box/argo.txt.b64
+            chown singbox:singbox /etc/sing-box/argo.txt.b64
         else
             echo "错误: 无法获取 argo 地址"
+            echo "请检查日志: tail -50 /var/log/cloudflared.log"
             exit 1
         fi
     fi
@@ -1031,8 +1143,8 @@ jq -n --arg listen_port "$listen_port" --arg vmess_port "$vmess_port" --arg vmes
             "alpn": [
                 "h3"
             ],
-            "certificate_path": "/root/self-cert/cert.pem",
-            "key_path": "/root/self-cert/private.key"
+            "certificate_path": "/etc/sing-box/certs/cert.pem",
+            "key_path": "/etc/sing-box/certs/private.key"
         }
     },
     {
@@ -1062,14 +1174,13 @@ jq -n --arg listen_port "$listen_port" --arg vmess_port "$vmess_port" --arg vmes
       "tag": "block"
     }
   ]
-}' > /root/sbox/sbconfig_server.json
+}' > /etc/sing-box/config.json
 
+# Set secure permissions for config file
+chmod 600 /etc/sing-box/config.json
+chown singbox:singbox /etc/sing-box/config.json
 
-
-# Create dedicated user
-create_singbox_user
-
-# Set secure permissions
+# Set permissions for keys and certs
 set_secure_permissions
 
 # Create sing-box.service with dedicated user
@@ -1084,20 +1195,20 @@ Wants=network.target
 Type=simple
 User=singbox
 Group=singbox
-WorkingDirectory=/root
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-ExecStart=/root/sbox/sing-box run -c /root/sbox/sbconfig_server.json
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=23
 LimitNOFILE=infinity
+# Capabilities for binding privileged ports
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/root
+ReadWritePaths=/etc/sing-box
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -1116,7 +1227,7 @@ EOF
 
 
 # Check configuration and start the service
-if /root/sbox/sing-box check -c /root/sbox/sbconfig_server.json; then
+if /usr/local/bin/sing-box check -c /etc/sing-box/config.json; then
     echo "Configuration checked successfully. Starting sing-box service..."
     systemctl daemon-reload
     systemctl enable sing-box > /dev/null 2>&1

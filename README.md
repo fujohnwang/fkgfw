@@ -51,8 +51,10 @@ sudo bash reality_hy2_ws.sh
 
 |项目||
 |:--|:--|
-|程序|**/root/sbox/sing-box**|
-|服务端配置|**/root/sbox/sbconfig_server.json**|
+|程序|**/usr/local/bin/sing-box**|
+|服务端配置|**/etc/sing-box/config.json**|
+|证书目录|**/etc/sing-box/certs/**|
+|密钥文件|**/etc/sing-box/public.key.b64**|
 |运行用户|**singbox** (非 root)|
 |重启|`systemctl restart sing-box`|
 |状态|`systemctl status sing-box`|
@@ -63,7 +65,8 @@ sudo bash reality_hy2_ws.sh
 
 |项目||
 |:--|:--|
-|程序|**/root/sbox/cloudflared-linux**|
+|程序|**/usr/local/bin/cloudflared**|
+|Argo 地址文件|**/etc/sing-box/argo.txt.b64**|
 |运行用户|**singbox** (非 root)|
 |重启|`systemctl restart cloudflared`|
 |状态|`systemctl status cloudflared`|
@@ -84,19 +87,21 @@ wget -N https://gitlab.com/fscarmen/warp/-/raw/main/warp-go.sh && bash warp-go.s
 
 安全增强版会自动设置以下文件权限：
 
-- 配置文件 (`sbconfig_server.json`): 600 (仅所有者可读写)
+- 配置文件 (`/etc/sing-box/config.json`): 600 (仅所有者可读写)
 - 密钥文件 (`*.key`, `*.b64`): 600
-- 证书目录 (`/root/self-cert`): 700
-- 二进制文件 (`sing-box`, `cloudflared-linux`): 755
+- 证书目录 (`/etc/sing-box/certs`): 700
+- 二进制文件 (`/usr/local/bin/sing-box`, `/usr/local/bin/cloudflared`): 755
+- 所有配置文件所有者: `singbox:singbox`
 
 ### 故障排查
 
 如果服务无法启动，请检查：
 
 1. 用户权限: `id singbox`
-2. 文件权限: `ls -la /root/sbox/`
-3. 服务日志: `journalctl -u sing-box -n 50`
-4. 配置验证: `/root/sbox/sing-box check -c /root/sbox/sbconfig_server.json`
+2. 文件权限: `ls -la /etc/sing-box/`
+3. 二进制文件: `ls -la /usr/local/bin/sing-box /usr/local/bin/cloudflared`
+4. 服务日志: `journalctl -u sing-box -n 50`
+5. 配置验证: `/usr/local/bin/sing-box check -c /etc/sing-box/config.json`
 
 
 ## Credit
