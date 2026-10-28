@@ -1,0 +1,6 @@
+- 两个入口共用 installer/protocols 和 jq 模板；默认组合分别为 Reality+Hysteria2、全部四种，均支持 15 种非空组合及交叉管理。使用时需保留 lib/。
+- 组合调整保留仍选中的 inbound；仅新增协议生成认证信息。移除后重加会生成新凭据。自定义 logical rule 引用被移除协议时拒绝自动改写。
+- 只有 WS 需要 Caddy/cloudflared；移除最后一个 WS 后停止并禁用服务，保留程序与配置供重用。Caddy 路由和辅助服务定义按选择重建；只改后端时不重启现有 Tunnel，真正重启可能改变域名。
+- 组合变更整体备份并恢复配置及 active/enabled 状态；二进制升级仍按组件独立回滚。备份和旧 /root 原件含密钥，需自行决定清理时间。
+- 安装/升级取最新 stable 并强制校验 GitHub SHA256；当前验证目标 sing-box 1.14.4、cloudflared 2026.10.5、Caddy 2.11.7。Hysteria2 自签名行为保留。
+- 定向验证：15 种真实配置、225 种组合切换、12 项升级及 9 项组合故障测试。最终 Debian arm64 测试已通过 15 种安装、本地流量、增删协议、改端口和卸载；systemd 调度和 Quick Tunnel 域名模拟，真实隔离及公网隧道仍需在服务器验证。
