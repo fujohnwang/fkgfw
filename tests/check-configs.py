@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get('SING_BOX_BINARY', 'sing-box')
@@ -51,6 +52,8 @@ with tempfile.TemporaryDirectory(prefix='fkgfw-config-') as temp:
         assert len(links) == len(selected)
         if 'vless-in' in selected: assert any('@[2001:db8::1]:10443' in link for link in links)
         clash = filter_json('clash.jq', client)
+        clash_yaml = run('jq', '-r', '-f', str(ROOT / 'lib/yaml.jq'), input=json.dumps(clash))
+        assert yaml.safe_load(clash_yaml) == clash
         assert len(clash['proxies']) == len(selected)
         assert all(p.get('uuid') == params['uuid'] for p in clash['proxies'] if p['type'] != 'hysteria2')
         # All selection transitions preserve retained credentials, ports and custom fields.

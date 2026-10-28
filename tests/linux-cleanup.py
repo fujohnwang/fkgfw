@@ -43,8 +43,9 @@ if action == 'show':
         'ActiveState':state.read_text() if state.exists() else 'inactive','UnitFileState':'enabled'}[key])
 elif action == 'stop':
  name=args[1].removesuffix('.service'); pathlib.Path('/tmp/state-'+name).write_text('inactive')
- if name == 'cloudflared':
-  with open('/var/log/cloudflared.log','a') as stream: stream.write('stopped\\n')
+ logfile={'cloudflared':'/var/log/cloudflared.log','cloudflared-vmess':'/var/log/cf-vmess.log','cloudflared-vless':'/var/log/cf-vless.log'}.get(name)
+ if logfile:
+  with open(logfile,'a') as stream: stream.write('stopped\\n')
 elif action not in ('disable','daemon-reload'): sys.exit(1)
 ''')
 mock.chmod(0o755)
@@ -138,12 +139,19 @@ try:
     caddy = spawn('/usr/local/bin/caddy', ['run', '--config', '/etc/caddy/Caddyfile'])
     tunnel = spawn('/usr/local/bin/cloudflared', ['tunnel', '--url', 'http://127.0.0.1:28080', '--no-autoupdate', '--protocol', 'auto', '--logfile', '/var/log/cloudflared.log'])
     unrelated = spawn('/usr/local/bin/cloudflared', ['tunnel', 'run', '--token', 'fixture-secret-token'])
-    invoke('--dry-run', entry='cleanup.sh')
+    invoke('--dry-run', entry='cleanup.sh', success=False)
     assert all(alive(p) for p in [current, caddy, tunnel, unrelated])
     output = invoke(entry='cleanup.sh', success=False)
     assert '处理后再安装' in output and '迁移准备完成' not in output
+    assert '清理前检查未通过' in output
+    assert all(alive(p) for p in [current, caddy, tunnel, unrelated])
+    assert Path('/etc/caddy/Caddyfile').exists() and Path('/etc/sing-box/config.json').exists()
+    assert len(list(Path('/var/backups/fkgfw').glob('cleanup.*'))) == 1
+    print('PASS: unrelated token tunnel blocks all cleanup before any service or file changes', flush=True)
+    unrelated.terminate(); unrelated.wait(timeout=3)  # Only this test fixture removes its unrelated process.
+    output = invoke(entry='cleanup.sh')
     assert not any(alive(p) for p in [current, caddy, tunnel])
-    assert alive(unrelated) and Path('/usr/local/bin/cloudflared').exists()
+    assert not Path('/usr/local/bin/cloudflared').exists()
     assert 'fixture-secret-token' not in output
     assert not Path('/etc/sing-box').exists()
     assert not Path('/root/sbox/sbconfig_server.json').exists()
@@ -158,7 +166,37 @@ try:
     assert (reset / 'cloudflared-stopped.log').read_text() == 'started\nstopped\n'
     assert Path('/var/backups/fkgfw/legacy-migrated').read_text() == 'marker'
     assert Path('/var/backups/fkgfw/previous/sing-box').read_text() == 'upgrade-backup'
-    print('PASS: cleanup alias handles /etc layout, preserves unrelated tunnel and backups, and reports remaining conflicts', flush=True)
+    print('PASS: cleanup alias handles /etc layout and preserves backups', flush=True)
+
+    # Reproduce the diagnosed server after its earlier partial cleanup: Caddy
+    # is gone, the loaded sing-box unit points to /root, but its live process
+    # uses /etc; each WS protocol has an independent Quick Tunnel unit.
+    config('/root/sbconfig_server.json')
+    config('/etc/sing-box/config.json', True)
+    value = json.loads(Path('/etc/sing-box/config.json').read_text())
+    value['inbounds'].append({'type': 'vless', 'tag': 'vless-ws-in', 'listen_port': 18444, 'transport': {'type': 'ws'}})
+    Path('/etc/sing-box/config.json').write_text(json.dumps(value))
+    shutil.copy2('/usr/bin/yes', '/root/sing-box')
+    unit('sing-box', 'sing-box service', '/root/sing-box run -c /root/sbconfig_server.json')
+    current = spawn('/usr/local/bin/sing-box', ['run', '-c', '/etc/sing-box/config.json'])
+    direct = []
+    for name, description, port in [('vmess', 'VMess', 18443), ('vless', 'VLESS', 18444)]:
+        logfile = '/var/log/cf-' + name + '.log'
+        put(logfile, 'started\n'); put('/usr/local/bin/cf-' + name + '-post.sh', '# fixture helper')
+        unit('cloudflared-' + name, 'Cloudflared ' + description + ' Tunnel', f'/usr/local/bin/cloudflared tunnel --url http://localhost:{port} --logfile {logfile}')
+        direct.append(spawn('/usr/local/bin/cloudflared', ['tunnel', '--url', f'http://localhost:{port}', '--logfile', logfile]))
+    output = invoke('--dry-run')
+    assert 'cloudflared-vmess' in output and 'cloudflared-vless' in output
+    assert all(alive(p) for p in [current, *direct])
+    invoke()
+    assert not any(alive(p) for p in [current, *direct])
+    assert not Path('/root/sing-box').exists() and not Path('/etc/sing-box').exists()
+    for name in ['vmess', 'vless']:
+        assert not Path('/etc/systemd/system/cloudflared-' + name + '.service').exists()
+        assert not Path('/usr/local/bin/cf-' + name + '-post.sh').exists()
+        assert any((b / ('cf-' + name + '-stopped.log')).read_text() == 'started\nstopped\n'
+                   for b in Path('/var/backups/fkgfw').glob('cleanup.*') if (b / ('cf-' + name + '-stopped.log')).exists())
+    print('PASS: mixed sing-box paths and independent VMess/VLESS tunnels migrate after prior partial cleanup', flush=True)
 finally:
     for process in children:
         if process.poll() is None: process.terminate()

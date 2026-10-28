@@ -91,14 +91,18 @@ sudo bash install.sh                # 清理成功后，两个安装入口任选
 
 删除前全部备份到权限为 `700` 的 `/var/backups/fkgfw/cleanup.*`：`files/` 按原绝对路径保存文件及其权限、所有者，`manifest.json` 记录服务原 active/enabled 状态。已有升级备份和迁移标记始终保留。恢复时可按清单用 `cp -a` 将所需文件放回原路径，再 reload systemd 并按原状态启用服务。
 
-脚本核对可执行文件路径、启动参数、配置和服务控制组；同名的其他程序、自定义服务覆盖、命名/token 隧道及无法确认归属的项目会保留并说明原因。如仍有冲突的部署路径，脚本返回失败，处理提示项后再安装。独立进程使用 pidfd 发送 SIGTERM，10 秒未退出就停止删除。备份失败不会停止服务；停止服务后的失败会保留待删文件和备份，但已经停止的服务不会自动重启。清理与安装、升级共用锁，避免同时修改。
+脚本核对可执行文件路径、启动参数、配置和服务控制组；也支持旧的 `cloudflared-vmess.service` / `cloudflared-vless.service` 独立隧道，需日志路径及目标 WS 端口与已识别配置匹配。同名的其他程序、自定义服务覆盖、命名/token 隧道及无法确认归属的项目会保留并说明原因。清理前会检查计划执行后的残留，有冲突即返回失败，不会先停止部分服务；处理提示项后再运行。`--dry-run` 检查不通过也返回非零状态。若提示 systemd 尚未加载磁盘变更，先核对服务文件，再执行 `sudo systemctl daemon-reload` 并重新预览。
+
+独立进程使用 pidfd 发送 SIGTERM，10 秒未退出就停止删除。备份失败不会停止服务；执行中发生的停止失败或进程重新启动会保留待删文件和备份，但已经停止的服务不会自动重启。清理与安装、升级共用锁，避免同时修改。
 
 ## 客户端与日志
 
 - 服务端：`/etc/sing-box/config.json`
 - sing-box 客户端：`/etc/sing-box/client.json`
 - Mihomo / Clash Meta 客户端：`/etc/sing-box/clash.json`（JSON 格式，可由 YAML 解析器读取）
+- Clash Meta / Mihomo YAML 客户端：`/etc/sing-box/clash.yaml`，包含节点、策略组和规则，可直接导入支持这些协议的客户端。
 - 分享链接与客户端节点只包含当前已选协议，菜单 `3` 可重新生成。
+- 安装完成时同时显示 sing-box JSON、Clash JSON 和 Clash YAML。已有安装更新脚本后，运行任意安装入口并选择菜单 `3` 即可补充生成 YAML，无需重新安装。YAML 与 Clash JSON 从同一份数据生成，保留相同凭据，文件权限均为 `600`。
 - sing-box 客户端采用新版 DNS、TUN、rule-set 与 route action 格式；当前验证版本为 1.14.4。首次使用需下载 SagerNet 分流规则。
 - Hysteria2 使用自签名证书，客户端保留 `insecure: true`。
 
@@ -115,10 +119,11 @@ bash -n install.sh reality_hy2_ws.sh migration.sh cleanup.sh lib/*.sh
 python3 tests/test-updates.py
 python3 tests/test-combinations.py
 python3 tests/test-cleanup.py
+python3 tests/test-client-exports.py
 SING_BOX_BINARY=/path/to/sing-box python3 tests/check-configs.py
 ```
 
-配置测试使用真实 sing-box 检查 15 种组合，并检查 225 种切换的参数保留、分享链接和 Mihomo 节点。故障测试使用隔离目录和模拟服务。
+配置测试使用真实 sing-box 检查 15 种组合，并检查 225 种切换的参数保留、分享链接、Mihomo 节点及 YAML/JSON 内容一致性。客户端导出与配置测试需要 PyYAML（Debian/Ubuntu 开发环境可安装 `python3-yaml`，下面的测试镜像已包含）；服务器导出仅使用已有 jq。故障测试使用隔离目录和模拟服务。
 
 最终 Linux 安装与本地流量测试（需要 Docker）：
 

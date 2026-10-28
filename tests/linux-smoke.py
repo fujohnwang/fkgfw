@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+import yaml
 
 if os.environ.get('FKGFW_CONTAINER_TEST') != '1' or not Path('/.dockerenv').exists():
     raise SystemExit('Run only in the disposable Docker test container described in README.md')
@@ -117,7 +118,12 @@ def validate(selected):
     run('/usr/local/bin/sing-box', 'check', '-c', '/etc/sing-box/client.json')
     client = json.loads(Path('/etc/sing-box/client.json').read_text())
     assert len([o for o in client['outbounds'] if o['tag'].startswith('sing-box-')]) == len(selected)
-    assert len(json.loads(Path('/etc/sing-box/clash.json').read_text())['proxies']) == len(selected)
+    clash = json.loads(Path('/etc/sing-box/clash.json').read_text())
+    assert len(clash['proxies']) == len(selected)
+    clash_yaml = Path('/etc/sing-box/clash.yaml')
+    assert yaml.safe_load(clash_yaml.read_text()) == clash
+    assert clash_yaml.stat().st_mode & 0o777 == 0o600
+    assert 'Clash Meta / Mihomo 客户端配置（YAML' in Path('/tmp/installer.log').read_text()
     run('systemd-analyze', 'verify', '/etc/systemd/system/sing-box.service')
     if set(selected) & set(TAGS[2:]):
         run('systemd-analyze', 'verify', '/etc/systemd/system/caddy.service', '/etc/systemd/system/cloudflared.service')
@@ -196,6 +202,7 @@ run('shellcheck', '--severity=error', '-x', 'install.sh', 'reality_hy2_ws.sh', '
 run('python3', 'tests/test-updates.py')
 run('python3', 'tests/test-combinations.py')
 run('python3', 'tests/test-cleanup.py')
+run('python3', 'tests/test-client-exports.py')
 run('openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes',
     '-keyout', '/tmp/origin.key', '-out', '/tmp/origin.pem', '-days', '1', '-subj', '/CN=example.com', stderr=subprocess.DEVNULL)
 origin = subprocess.Popen(['openssl', 's_server', '-tls1_3', '-accept', '18446', '-cert', '/tmp/origin.pem', '-key', '/tmp/origin.key', '-www'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

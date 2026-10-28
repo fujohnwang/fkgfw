@@ -1,4 +1,4 @@
-# JSON is accepted by Mihomo's YAML parser; serialize values with jq.
+# Shared Clash Meta / Mihomo data; export both JSON and YAML from this object.
 [.outbounds[] | select(.tag | startswith("sing-box-"))
  | {name: .tag, type: .type, server: .server, port: .server_port, udp: true}
    + (if .type == "hysteria2" then

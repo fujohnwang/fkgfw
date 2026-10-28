@@ -26,9 +26,11 @@ export_clients() (
     trap 'rm -rf "$export_stage"' EXIT
     render_client_config /etc/sing-box/config.json "$export_address" > "$export_stage/client.json"
     jq -f "$SCRIPT_DIR/lib/clash.jq" "$export_stage/client.json" > "$export_stage/clash.json"
-    chmod 600 "$export_stage/client.json" "$export_stage/clash.json"
+    jq -r -f "$SCRIPT_DIR/lib/yaml.jq" "$export_stage/clash.json" > "$export_stage/clash.yaml"
+    chmod 600 "$export_stage/client.json" "$export_stage/clash.json" "$export_stage/clash.yaml"
     mv -f "$export_stage/client.json" /etc/sing-box/client.json
     mv -f "$export_stage/clash.json" /etc/sing-box/clash.json
+    mv -f "$export_stage/clash.yaml" /etc/sing-box/clash.yaml
 )
 
 show_configuration() (
@@ -40,6 +42,8 @@ show_configuration() (
     cat /etc/sing-box/client.json
     echo 'Mihomo 客户端配置（/etc/sing-box/clash.json）：'
     cat /etc/sing-box/clash.json
+    echo 'Clash Meta / Mihomo 客户端配置（YAML，/etc/sing-box/clash.yaml）：'
+    cat /etc/sing-box/clash.yaml
 )
 
 # This transaction owns only the project's configs, services and binaries.

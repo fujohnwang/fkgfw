@@ -67,6 +67,18 @@ class CleanupTests(unittest.TestCase):
         if sbox: self.put('/root/sbox/cloudflared-linux')
         return binary, config
 
+    def direct_tunnels(self):
+        self.modern()
+        filename = self.config(cleanup.CONFIGS[2], ws=True)
+        value = json.loads(filename.read_text())
+        value['inbounds'].append({'type': 'vless', 'tag': 'vless-ws-in', 'listen_port': 18444, 'transport': {'type': 'ws'}})
+        filename.write_text(json.dumps(value))
+        self.put('/usr/local/bin/cloudflared')
+        for port, (name, details) in enumerate(cleanup.DIRECT_TUNNELS.items(), start=18443):
+            self.unit(name, f'/usr/local/bin/cloudflared tunnel --url http://localhost:{port} --logfile {details["log"]}', details['description'])
+            self.put(details['helper'], '# fixture helper')
+            self.put(details['log'], 'before\n')
+
     def process(self, pid, binary, args, group='', start='123', deleted=False):
         directory = self.root / 'proc' / str(pid); directory.mkdir()
         (directory / 'exe').symlink_to(binary + (' (deleted)' if deleted else ''))
@@ -86,8 +98,9 @@ class CleanupTests(unittest.TestCase):
         if args[1] == 'stop':
             if self.fail_stop: return subprocess.CompletedProcess(args, 1, '', 'failure')
             name = args[2].removesuffix('.service'); self.states[name] = 'inactive'
-            if name == 'cloudflared' and self.append_log:
-                with (self.root / 'var/log/cloudflared.log').open('a') as stream: stream.write('shutdown\n')
+            if self.append_log and (name == 'cloudflared' or name in cleanup.DIRECT_TUNNELS):
+                logfile = cleanup.DIRECT_TUNNELS[name]['log'] if name in cleanup.DIRECT_TUNNELS else '/var/log/cloudflared.log'
+                with (self.root / logfile.lstrip('/')).open('a') as stream: stream.write('shutdown\n')
         return subprocess.CompletedProcess(args, 0, '', '')
 
     def terminate(self, process):
@@ -226,6 +239,65 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual((backup / 'files/etc/sing-box/certs/private.key').read_text(), 'keep-me-in-backup')
         self.assertEqual((backup / 'files/var/log/cloudflared.log').read_text(), 'before\n')
         self.assertEqual((backup / 'cloudflared-stopped.log').read_text(), 'before\nshutdown\n')
+
+    def test_direct_tunnels_and_changed_running_singbox_layout(self):
+        # Reproduce the server: no Caddy left; disk unit uses /root while the
+        # live process still uses /usr/local/bin plus the /etc configuration.
+        self.direct_tunnels(); self.legacy(service=True); self.append_log = True
+        self.process(101, '/usr/local/bin/sing-box', ['run', '-c', cleanup.CONFIGS[2]], 'system.slice/sing-box.service')
+        for pid, (name, details) in enumerate(cleanup.DIRECT_TUNNELS.items(), start=102):
+            port = 18443 if name.endswith('vmess') else 18444
+            self.process(pid, '/usr/local/bin/cloudflared', ['tunnel', '--url', f'http://localhost:{port}', '--logfile', details['log']], f'system.slice/{name}.service')
+        result, output = self.cli('--yes')
+        self.assertEqual(result, 0, output)
+        self.assertCountEqual(self.signals, [101, 102, 103])
+        self.assertFalse((self.root / 'usr/local/bin/cloudflared').exists())
+        backup = next((self.root / 'var/backups/fkgfw').glob('cleanup.*'))
+        for name, details in cleanup.DIRECT_TUNNELS.items():
+            self.assertFalse((self.root / cleanup.UNITS[name].lstrip('/')).exists())
+            self.assertEqual((backup / 'files' / details['log'].lstrip('/')).read_text(), 'before\n')
+            self.assertEqual((backup / (Path(details['log']).stem + '-stopped.log')).read_text(), 'before\nshutdown\n')
+
+    def test_unmatched_direct_tunnel_port_blocks_all_cleanup(self):
+        self.direct_tunnels()
+        name = 'cloudflared-vmess'; details = cleanup.DIRECT_TUNNELS[name]
+        self.unit(name, '/usr/local/bin/cloudflared tunnel --url http://localhost:9999 --logfile /var/log/cf-vmess.log', details['description'])
+        result, output = self.cli('--yes')
+        self.assertNotEqual(result, 0)
+        self.assertIn('清理前检查未通过', output)
+        self.assertEqual(self.events, [])
+        self.assertTrue((self.root / 'etc/sing-box/config.json').exists())
+        self.assertFalse((self.root / 'var/backups').exists())
+
+    def test_named_tunnel_under_old_service_name_is_preserved(self):
+        self.direct_tunnels()
+        name = 'cloudflared-vless'; details = cleanup.DIRECT_TUNNELS[name]
+        self.unit(name, '/usr/local/bin/cloudflared tunnel run --token secret-token', details['description'])
+        result, output = self.cli('--yes')
+        self.assertNotEqual(result, 0)
+        self.assertEqual(self.events, [])
+        self.assertNotIn('secret-token', output)
+
+    def test_stale_service_blocks_before_any_partial_cleanup(self):
+        self.modern(ws=True)
+        self.overrides[('sing-box', 'NeedDaemonReload')] = 'yes'
+        result, output = self.cli('--yes')
+        self.assertNotEqual(result, 0)
+        self.assertIn('sudo systemctl daemon-reload', output)
+        self.assertIn('清理前检查未通过', output)
+        self.assertEqual(self.events, [])
+        self.assertFalse((self.root / 'var/backups').exists())
+        self.assertTrue((self.root / 'etc/caddy/Caddyfile').exists())
+
+    def test_shared_binary_blocks_before_stopping_owned_services(self):
+        self.modern(ws=True)
+        self.process(101, '/usr/local/bin/cloudflared', ['tunnel', 'run', '--token', 'secret-token'], 'system.slice/other.service')
+        result, output = self.cli('--yes')
+        self.assertNotEqual(result, 0)
+        self.assertIn('清理前检查未通过', output)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.signals, [])
+        self.assertTrue((self.root / 'etc/sing-box/config.json').exists())
 
     def test_same_name_other_config_and_token_tunnel_survive(self):
         self.modern(ws=True)

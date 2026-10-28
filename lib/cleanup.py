@@ -29,7 +29,14 @@ SB_PAIRS = {
     '/root/sbox/sing-box': CONFIGS[1],
     '/usr/local/bin/sing-box': CONFIGS[2],
 }
-UNITS = {name: f'/etc/systemd/system/{name}.service' for name in ['sing-box', 'caddy', 'cloudflared']}
+DIRECT_TUNNELS = {
+    'cloudflared-vmess': {'tag': 'vmess-in', 'description': 'Cloudflared VMess Tunnel',
+                         'log': '/var/log/cf-vmess.log', 'helper': '/usr/local/bin/cf-vmess-post.sh'},
+    'cloudflared-vless': {'tag': 'vless-ws-in', 'description': 'Cloudflared VLESS Tunnel',
+                         'log': '/var/log/cf-vless.log', 'helper': '/usr/local/bin/cf-vless-post.sh'},
+}
+UNITS = {name: f'/etc/systemd/system/{name}.service' for name in ['sing-box', 'caddy', 'cloudflared', *DIRECT_TUNNELS]}
+LOGS = ['/var/log/cloudflared.log'] + [value['log'] for value in DIRECT_TUNNELS.values()]
 MANAGED = {'vless-in': 'vless', 'hy2-in': 'hysteria2', 'vmess-in': 'vmess', 'vless-ws-in': 'vless'}
 
 
@@ -162,10 +169,20 @@ class Cleaner:
                 options[key] = args.pop(0)
             else:
                 return None  # Includes named/token tunnels and unknown subcommands.
-        if options.get('--logfile', '/var/log/cloudflared.log') != '/var/log/cloudflared.log':
-            return None
+        logfile = options.get('--logfile', '/var/log/cloudflared.log')
         url = re.fullmatch(r'http://(?:localhost|127\.0\.0\.1):(\d+)', str(options.get('--url', '')))
         if not url:
+            return None
+        if executable == '/usr/local/bin/cloudflared':
+            # Older customized deployments ran one Quick Tunnel per WS inbound.
+            # Require the exact logfile and a matching managed WS port, not the
+            # service/process name alone. Named/token tunnels remain rejected.
+            for name, details in DIRECT_TUNNELS.items():
+                ports = {str(i.get('listen_port')) for config in self.configs.values() for i in config['inbounds']
+                         if i.get('tag') == details['tag'] and i.get('transport', {}).get('type') == 'ws'}
+                if logfile == details['log'] and url.group(1) in ports:
+                    return name
+        if logfile != '/var/log/cloudflared.log':
             return None
         if executable == '/usr/local/bin/cloudflared' and url.group(1) == self.caddy_port:
             return 'modern'
@@ -191,6 +208,7 @@ class Cleaner:
                 key, value = line.split('=', 1)
                 values.setdefault((section, key), []).append(value)
         descriptions = {'sing-box': 'sing-box service', 'caddy': 'Caddy Local Reverse Proxy', 'cloudflared': 'Cloudflared Tunnel'}
+        descriptions.update({key: value['description'] for key, value in DIRECT_TUNNELS.items()})
         starts = values.get(('[Service]', 'ExecStart'), [])
         if values.get(('[Unit]', 'Description')) != [descriptions[name]] or len(starts) != 1:
             plan.note(f'保留 {filename}：服务定义与本项目不匹配。')
@@ -203,9 +221,20 @@ class Cleaner:
         if not role:
             plan.note(f'保留 {filename}：启动参数或配置无法确认归属。')
             return None
+        if (name in DIRECT_TUNNELS and role != name) or (name == 'cloudflared' and role in DIRECT_TUNNELS):
+            plan.note(f'保留 {filename}：隧道目标端口或日志与服务类型不匹配。')
+            return None
         # Effective units may differ from the file due to overrides or stale loads.
-        if self.property(name, 'FragmentPath') != filename or self.property(name, 'DropInPaths') or self.property(name, 'NeedDaemonReload') == 'yes':
-            plan.note(f'保留 {filename}：存在覆盖配置、其他加载路径或尚未 reload 的变更。')
+        fragment = self.property(name, 'FragmentPath')
+        dropins = self.property(name, 'DropInPaths')
+        reload_needed = self.property(name, 'NeedDaemonReload') == 'yes'
+        if fragment != filename:
+            plan.note(f'保留 {filename}：实际加载路径为 {fragment or "(空)"}。')
+        if dropins:
+            plan.note(f'保留 {filename}：存在覆盖配置 {dropins}。')
+        if reload_needed:
+            plan.note(f'保留 {filename}：systemd 尚未加载磁盘变更；请核对服务文件后执行 sudo systemctl daemon-reload，再重新预览。')
+        if fragment != filename or dropins or reload_needed:
             return None
         return {'role': role, 'binary': argv[0], 'active': self.property(name, 'ActiveState'),
                 'enabled': self.property(name, 'UnitFileState'), 'path': filename}
@@ -302,13 +331,17 @@ class Cleaner:
         if CONFIGS[1] in self.configs:
             if not self.path(UNITS['cloudflared']).exists() or self.units['cloudflared']:
                 self.add_file(plan, '/root/sbox/cloudflared-linux', '旧版 Quick Tunnel 程序')
-        for name in ['caddy', 'cloudflared']:
+        for name in ['caddy', 'cloudflared', *DIRECT_TUNNELS]:
             if name in plan.services:
                 self.add_file(plan, plan.services[name]['binary'], '本项目辅助程序')
                 if name == 'caddy': self.add_file(plan, '/etc/caddy/Caddyfile', '本项目反向代理配置')
                 if name == 'cloudflared':
                     self.add_file(plan, '/usr/local/bin/cloudflared-post-start.sh', '本项目 Tunnel 辅助脚本')
                     self.add_file(plan, '/var/log/cloudflared.log', '本项目 Tunnel 日志')
+                if name in DIRECT_TUNNELS:
+                    details = DIRECT_TUNNELS[name]
+                    self.add_file(plan, details['log'], '旧版独立 Tunnel 日志')
+                    self.add_file(plan, details['helper'], '旧版独立 Tunnel 辅助脚本')
         # Only exact download filenames used by historical installers.
         if self.configs and self.safe('/root') and self.path('/root').is_dir():
             pattern = r'sing-box-\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?-linux-(?:amd64|arm64|armv7)\.tar\.gz(?:\.sha256sum)?'
@@ -418,6 +451,7 @@ class Cleaner:
                 os.chown(destination, before.st_uid, before.st_gid, follow_symlinks=False)
 
     def apply(self, plan):
+        self.check_ready(plan)
         if not plan.files and not plan.services and not plan.processes:
             print('没有可自动清理的项目。')
             return None
@@ -452,11 +486,11 @@ class Cleaner:
                 raise RuntimeError(f'PID {process.pid} 仍使用待清理文件，停止删除；备份位于 {backup}。')
         # Cloudflared can append shutdown messages after the initial backup.
         # Keep both snapshots, then verify the stopped log like any other file.
-        log = '/var/log/cloudflared.log'
-        if log in plan.files:
-            if not self.regular(log): raise RuntimeError('Tunnel 日志路径已变化，停止删除。')
-            self.copy_backup(self.path(log), backup / 'cloudflared-stopped.log')
-            plan.files[log]['fingerprint'] = self.fingerprint(log)
+        for log in LOGS:
+            if log in plan.files:
+                if not self.regular(log): raise RuntimeError('Tunnel 日志路径已变化，停止删除。')
+                self.copy_backup(self.path(log), backup / (Path(log).stem + '-stopped.log'))
+                plan.files[log]['fingerprint'] = self.fingerprint(log)
         self.verify_files(plan)
         for name in plan.services:
             result = self.runner(['systemctl', 'disable', name + '.service'])
@@ -477,15 +511,20 @@ class Cleaner:
         if plan.notes: print('部分项目被保留，请查看上面的说明。')
         return backup
 
-    def check_ready(self):
-        # Retained conflicting paths must not silently lead into a fresh install.
+    def check_ready(self, plan=None):
+        # Check projected leftovers before any backup/stop/delete, then verify
+        # again after applying. Unrecognized deployments must not be half removed.
         names = CONFIGS + list(SB_PAIRS) + list(UNITS.values()) + [
             '/root/sbox/cloudflared-linux', '/usr/local/bin/caddy', '/usr/local/bin/cloudflared',
-            '/etc/caddy/Caddyfile', '/usr/local/bin/cloudflared-post-start.sh']
-        remaining = [name for name in names if self.path(name).exists() or self.path(name).is_symlink()]
-        remaining += [f'PID {p.pid} ({p.binary})' for p in self.processes() if p.binary in names]
+            '/etc/caddy/Caddyfile', '/usr/local/bin/cloudflared-post-start.sh'] + [value['helper'] for value in DIRECT_TUNNELS.values()]
+        planned_files = plan.files if plan else {}
+        planned_pids = {p.pid for p in plan.processes} if plan else set()
+        remaining = [name for name in names if (self.path(name).exists() or self.path(name).is_symlink())
+                     and not any(name == selected or name.startswith(selected + '/') for selected in planned_files)]
+        remaining += [f'PID {p.pid} ({p.binary})' for p in self.processes() if p.binary in names and p.pid not in planned_pids]
         if remaining:
-            raise RuntimeError('以下部署路径或进程仍保留，请根据扫描提示处理后再安装：' + '、'.join(remaining))
+            prefix = '清理前检查未通过，尚未停止服务或删除部署文件。' if plan else ''
+            raise RuntimeError(prefix + '以下部署路径或进程仍保留，请根据扫描提示处理后再安装：' + '、'.join(remaining))
 
 
 def main(argv=None):
@@ -503,6 +542,7 @@ def main(argv=None):
     try:
         plan = cleaner.plan()
         cleaner.show(plan)
+        cleaner.check_ready(plan)
         if args.dry_run:
             print('仅预览；直接运行 sudo bash migration.sh 可确认并执行。')
             return 0
