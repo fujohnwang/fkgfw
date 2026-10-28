@@ -4,6 +4,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
@@ -38,6 +39,12 @@ sys.exit(result.returncode)
 write('systemctl', '''#!/usr/bin/python3
 import os, sys, signal, subprocess, time, pathlib, shlex
 args=sys.argv[1:]; action=args[0]; names=[a.removesuffix('.service') for a in args[1:] if not a.startswith('-')]
+if action=='show':
+ name=names[0]; key=next(a.split('=',1)[1] for a in args if a.startswith('--property='))
+ print({'FragmentPath':'/etc/systemd/system/'+name+'.service','DropInPaths':'','NeedDaemonReload':'no',
+        'ActiveState':'active' if pathlib.Path('/tmp/service-'+name).exists() else 'inactive',
+        'UnitFileState':'enabled' if pathlib.Path('/tmp/service-'+name+'.enabled').exists() else 'disabled'}[key])
+ sys.exit(0)
 for name in names:
  path=pathlib.Path('/tmp/service-'+name)
  enabled=pathlib.Path(str(path)+'.enabled')
@@ -151,9 +158,44 @@ def traffic(selected):
     print('PASS traffic:', ', '.join(selected), flush=True)
 
 
-run('shellcheck', '--severity=error', '-x', 'install.sh', 'reality_hy2_ws.sh', *map(str, Path('lib').glob('*.sh')))
+def migrate_old_deployment(sbox=False):
+    folder = Path('/root/sbox' if sbox else '/root'); folder.mkdir(parents=True, exist_ok=True)
+    binary = folder / 'sing-box'; config = folder / 'sbconfig_server.json'
+    old = {'inbounds': [{'type': 'hysteria2', 'tag': 'hy2-in', 'listen_port': 10443,
+                        'users': [{'password': 'old-password'}], 'tls': {'certificate_path': '/root/self-cert/cert.pem', 'key_path': '/root/self-cert/private.key'}}],
+           'outbounds': [{'type': 'direct', 'tag': 'direct'}]}
+    if sbox: old['inbounds'].append({'type': 'vmess', 'tag': 'vmess-in', 'listen_port': 18443, 'transport': {'type': 'ws'}})
+    config.write_text(json.dumps(old))
+    certificates = Path('/root/self-cert'); certificates.mkdir(exist_ok=True)
+    (certificates / 'cert.pem').write_text('old certificate')
+    (certificates / 'private.key').write_text('old private key')
+    (folder / 'public.key.b64').write_text('old public key')
+    shutil.copy2('/usr/bin/yes', binary)
+    Path('/etc/systemd/system/sing-box.service').write_text(f'[Unit]\nDescription=sing-box service\n[Service]\nExecStart={binary} run -c {config}\n')
+    proc = subprocess.Popen([str(binary), 'run', '-c', str(config)], stdout=subprocess.DEVNULL, start_new_session=True, env=dict(os.environ, POSIXLY_CORRECT='1'))
+    Path('/tmp/service-sing-box').write_text(str(proc.pid)); Path('/tmp/service-sing-box.enabled').touch()
+    tunnel = None
+    if sbox:
+        shutil.copy2('/usr/bin/yes', folder / 'cloudflared-linux')
+        tunnel = subprocess.Popen([str(folder / 'cloudflared-linux'), 'tunnel', '--url', 'http://localhost:18443', '--no-autoupdate'], stdout=subprocess.DEVNULL, env=dict(os.environ, POSIXLY_CORRECT='1'))
+    try:
+        time.sleep(.1)
+        invoke('cleanup.sh' if sbox else 'migration.sh', 'yes\n')
+        assert proc.wait(timeout=5) != 0
+        if tunnel: assert tunnel.wait(timeout=5) != 0
+        assert not config.exists() and not binary.exists() and not CONFIG.exists()
+        assert not Path('/etc/systemd/system/sing-box.service').exists()
+        assert any((backup / 'files' / str(config).lstrip('/')).exists() for backup in Path('/var/backups/fkgfw').glob('cleanup.*'))
+        print('PASS migration before install:', folder, flush=True)
+    finally:
+        for child in [proc, tunnel]:
+            if child and child.poll() is None: child.terminate(); child.wait(timeout=5)
+
+
+run('shellcheck', '--severity=error', '-x', 'install.sh', 'reality_hy2_ws.sh', 'migration.sh', 'cleanup.sh', *map(str, Path('lib').glob('*.sh')))
 run('python3', 'tests/test-updates.py')
 run('python3', 'tests/test-combinations.py')
+run('python3', 'tests/test-cleanup.py')
 run('openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes',
     '-keyout', '/tmp/origin.key', '-out', '/tmp/origin.pem', '-days', '1', '-subj', '/CN=example.com', stderr=subprocess.DEVNULL)
 origin = subprocess.Popen(['openssl', 's_server', '-tls1_3', '-accept', '18446', '-cert', '/tmp/origin.pem', '-key', '/tmp/origin.key', '-www'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -163,6 +205,7 @@ try:
     combinations = [list(c) for n in range(1, 5) for c in itertools.combinations(TAGS, n)]
     for index, selected in enumerate(combinations):
         entry = 'install.sh' if index % 2 == 0 else 'reality_hy2_ws.sh'
+        if index < 2: migrate_old_deployment(sbox=index == 1)
         invoke(entry, inputs(selected))
         validate(selected)
         assert Path('/etc/sing-box/public.key.b64').exists() == ('vless-in' in selected)
@@ -192,7 +235,7 @@ try:
     assert old == current
     traffic(previous)
     invoke('install.sh', '4\nyes\n')
-    print('PASS Linux: 15 fresh installs, protocol transitions, editing, uninstall and local traffic', flush=True)
+    print('PASS Linux: migration into both installers, 15 fresh installs, protocol transitions, editing, uninstall and local traffic', flush=True)
 finally:
     origin.terminate(); origin.wait(timeout=5)
     http.terminate(); http.wait(timeout=5)

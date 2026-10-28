@@ -32,6 +32,8 @@ sudo bash install.sh
 
 必须保留整个仓库的 `lib/` 目录，不能只复制入口脚本。
 
+已有旧部署、准备切换到新版时，先运行下面的 `migration.sh` 完成一次性清理，再运行安装入口。
+
 只安装直连协议时不下载、配置或启动 Caddy / cloudflared。只有 Reality 生成 Reality 密钥，只有 Hysteria2 生成自签名证书。涉及公网直连时会自动探测服务器地址；也可指定：
 
 ```bash
@@ -69,6 +71,28 @@ sudo env SERVER_ADDRESS=203.0.113.10 bash install.sh
 
 旧 `/root` 安装会迁移到 `/etc/sing-box` 和 `/usr/local/bin`，保留原文件及服务备份。成功标记位于 `/var/backups/fkgfw/legacy-migrated`，避免卸载后自动重新迁入。
 
+## 从旧部署切换到新版（只做一次）
+
+在新版仓库目录运行 `migration.sh`。它会列出已有部署，输入 `yes` 后先备份，再停止旧服务、清理旧程序、残留进程和配置；不要求已经安装新版。`cleanup.sh` 是同一流程的兼容入口。
+
+```bash
+sudo bash migration.sh              # 也可以用 sudo bash cleanup.sh；按提示输入 yes
+sudo bash install.sh                # 清理成功后，两个安装入口任选其一
+# sudo bash reality_hy2_ws.sh
+```
+
+清理覆盖本项目历史 `/root`、`/root/sbox` 和 `/etc/sing-box` 部署，包括相关程序、配置、证书、密钥、服务定义、Tunnel 日志和安装包。旧配置从原位置移除，避免新版入口继续管理或自动迁入旧部署。随后按新版菜单重新选择协议和参数，生成新的认证信息，并更新客户端。
+
+**完成这次切换后，不需要再运行迁移脚本。** 日后的升级、协议调整、重启或卸载，都通过 `install.sh` 或 `reality_hy2_ws.sh` 管理。再次确认执行迁移脚本也会清理已安装的新部署。
+
+需要仅查看范围时可用 `sudo bash migration.sh --dry-run`；自动化可用 `--yes` 跳过交互确认。此前的 `--reset --apply` 写法仍可执行相同清理流程。
+
+迁移准备需要 Linux、root 权限和 Python 3.9+；检查服务使用 systemd，终止残留进程需要内核支持 pidfd。请保留整个仓库。
+
+删除前全部备份到权限为 `700` 的 `/var/backups/fkgfw/cleanup.*`：`files/` 按原绝对路径保存文件及其权限、所有者，`manifest.json` 记录服务原 active/enabled 状态。已有升级备份和迁移标记始终保留。恢复时可按清单用 `cp -a` 将所需文件放回原路径，再 reload systemd 并按原状态启用服务。
+
+脚本核对可执行文件路径、启动参数、配置和服务控制组；同名的其他程序、自定义服务覆盖、命名/token 隧道及无法确认归属的项目会保留并说明原因。如仍有冲突的部署路径，脚本返回失败，处理提示项后再安装。独立进程使用 pidfd 发送 SIGTERM，10 秒未退出就停止删除。备份失败不会停止服务；停止服务后的失败会保留待删文件和备份，但已经停止的服务不会自动重启。清理与安装、升级共用锁，避免同时修改。
+
 ## 客户端与日志
 
 - 服务端：`/etc/sing-box/config.json`
@@ -87,9 +111,10 @@ journalctl -u cloudflared -n 50
 ## 验证
 
 ```bash
-bash -n install.sh reality_hy2_ws.sh lib/*.sh
+bash -n install.sh reality_hy2_ws.sh migration.sh cleanup.sh lib/*.sh
 python3 tests/test-updates.py
 python3 tests/test-combinations.py
+python3 tests/test-cleanup.py
 SING_BOX_BINARY=/path/to/sing-box python3 tests/check-configs.py
 ```
 
@@ -104,4 +129,12 @@ docker run --rm --init -e FKGFW_CONTAINER_TEST=1 \
   --workdir /repo fkgfw-smoke:local python3 tests/linux-smoke.py
 ```
 
-该测试使用真实程序完成所有组合的新安装、组合调整、参数修改和本地代理请求。systemd 调度及 Quick Tunnel 域名采用模拟实现，服务文件另经 `systemd-analyze verify` 检查；不建立公网隧道，不覆盖真实 systemd 隔离行为。
+该测试先验证旧 `/root` 和 `/root/sbox` 部署清理后分别进入两个新版安装入口，再使用真实程序完成所有组合的新安装、组合调整、参数修改和本地代理请求。systemd 调度及 Quick Tunnel 域名采用模拟实现，服务文件另经 `systemd-analyze verify` 检查；不建立公网隧道，不覆盖真实 systemd 隔离行为。
+
+清理脚本的最终 Linux 集成测试使用同一镜像，验证真实 `/proc` 识别、pidfd 终止进程、锁、备份和保留范围；systemd 调度模拟。只在一次性容器内运行：
+
+```bash
+docker run --rm --init --network none -e FKGFW_CONTAINER_TEST=1 \
+  --mount type=bind,src="$PWD",dst=/repo,readonly \
+  --workdir /repo fkgfw-smoke:local python3 tests/linux-cleanup.py
+```
