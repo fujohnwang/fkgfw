@@ -1,6 +1,6 @@
 # sing-box 协议组合安装脚本
 
-支持 **Reality、Hysteria2、VMess WS、VLESS WS** 四种协议的任意非空组合，共 15 种。WebSocket 通过 Caddy + Cloudflare Quick Tunnel 接入。
+支持 **Reality、Hysteria2、VMess WS、VLESS WS、VLESS TLS + Vision、AnyTLS** 六种协议的任意非空组合，共 63 种。WebSocket 通过 Caddy + Cloudflare Quick Tunnel 接入。
 
 ## 安装
 
@@ -22,8 +22,12 @@ sudo bash install.sh
 | 4 | VMess WS + VLESS WS |
 | 5 | 全部四种 |
 | 6 | 自定义多选 |
+| 7 | 仅 VLESS TLS + Vision |
+| 8 | 仅 AnyTLS |
+| 9 | VLESS TLS + Vision + AnyTLS |
+| 10 | 全部六种 |
 
-自定义模式中，`1=Reality`、`2=Hysteria2`、`3=VMess WS`、`4=VLESS WS`。例如输入 `1,4` 安装 Reality + VLESS WS；输入 `3` 仅安装 VMess WS。
+自定义模式中，`1=Reality`、`2=Hysteria2`、`3=VMess WS`、`4=VLESS WS`、`5=VLESS TLS + Vision`、`6=AnyTLS`。例如输入 `2,5,6` 安装 Hysteria2 + VLESS TLS + Vision + AnyTLS。原有默认组合和菜单 1–6 的含义保留。
 
 两个入口都支持全部组合，也能管理对方创建的安装：
 
@@ -40,6 +44,20 @@ sudo bash install.sh
 sudo env SERVER_ADDRESS=203.0.113.10 bash install.sh
 ```
 
+### 自有域名 TLS 协议
+
+VLESS TLS + Vision 和 AnyTLS 均使用普通 TLS、受信任证书和服务器直连。安装时填写域名和端口，默认端口分别为 **9443/TCP、10443/TCP**，可以修改。两个协议可共用一个域名，但 TCP 端口必须不同；也可分别使用不同子域名。
+
+- 域名的公网 A/AAAA 记录须全部指向这台服务器。Cloudflare 记录必须为灰云「仅 DNS」，普通橙云代理不适用于这两个协议。没有可用 IPv6 时请删除 AAAA 记录。
+- 脚本检查公网 DNS 与本机公网 IP；公网地址探测受限或使用 NAT 时可用 `SERVER_ADDRESS` 指定真实公网 IP。
+- 必须放行公网 **TCP 80** 和所选代理端口。TCP 80 用于 HTTP-01 证书申请及续期，不能被其他服务或代理占用；脚本不修改防火墙。
+- 使用 sing-box **1.14+（with_acme）** 的共享 ACME provider 自动申请和续期 Let's Encrypt 证书，不需要上传证书或提供 Cloudflare Token。已有旧版程序请先用管理菜单 5 更新。
+- 两个协议共用 `/etc/sing-box/acme` 中的证书缓存，目录权限为 `700`。服务仅增加该目录的写入权限。移除协议时保留缓存，完整卸载或迁移清理时随 `/etc/sing-box` 清理；备份含证书和账户私钥。
+- 初次申请可能需要等待。脚本验证证书域名、信任链和本地 TLS 监听后才显示成功，超过 180 秒或验证失败会恢复原配置；可用 `journalctl -u sing-box` 排查 DNS、CAA 或端口问题。
+- 客户端 JSON、Mihomo YAML/JSON 和分享链接均使用真实证书校验。Cloudflare Origin CA 证书不能替代这里的公开受信任证书。
+
+本选项不配置 Xray 的静态网站 fallback；VLESS TLS + Vision 与 Reality 为独立可选节点。
+
 ## 管理已有安装
 
 再次运行任意入口：
@@ -47,7 +65,7 @@ sudo env SERVER_ADDRESS=203.0.113.10 bash install.sh
 | 选项 | 操作 |
 | --- | --- |
 | 1 | 调整协议组合 |
-| 2 | 修改已安装协议的端口 / SNI / WS 路径 |
+| 2 | 修改已安装协议的端口 / SNI / 证书域名 / WS 路径 |
 | 3 | 显示客户端配置和分享链接 |
 | 4 | 卸载 |
 | 5 | 更新当前组合所需的服务端程序 |
@@ -121,9 +139,13 @@ python3 tests/test-combinations.py
 python3 tests/test-cleanup.py
 python3 tests/test-client-exports.py
 SING_BOX_BINARY=/path/to/sing-box python3 tests/check-configs.py
+SING_BOX_BINARY=/path/to/sing-box bash tests/test-tls.sh
+SING_BOX_BINARY=/path/to/sing-box bash tests/test-tls-transaction.sh
 ```
 
 配置测试使用真实 sing-box 检查 15 种组合，并检查 225 种切换的参数保留、分享链接、Mihomo 节点及 YAML/JSON 内容一致性。客户端导出与配置测试需要 PyYAML（Debian/Ubuntu 开发环境可安装 `python3-yaml`，下面的测试镜像已包含）；服务器导出仅使用已有 jq。故障测试使用隔离目录和模拟服务。
+
+新增 Bash 测试覆盖六种协议的 63 种配置、共享证书 provider、域名/DNS 校验、新节点导出，以及证书失败的事务回滚和保留凭据的域名修改。
 
 最终 Linux 安装与本地流量测试（需要 Docker）：
 
@@ -134,7 +156,19 @@ docker run --rm --init -e FKGFW_CONTAINER_TEST=1 \
   --workdir /repo fkgfw-smoke:local python3 tests/linux-smoke.py
 ```
 
-该测试先验证旧 `/root` 和 `/root/sbox` 部署清理后分别进入两个新版安装入口，再使用真实程序完成所有组合的新安装、组合调整、参数修改和本地代理请求。systemd 调度及 Quick Tunnel 域名采用模拟实现，服务文件另经 `systemd-analyze verify` 检查；不建立公网隧道，不覆盖真实 systemd 隔离行为。
+该测试先验证旧 `/root` 和 `/root/sbox` 部署清理后分别进入两个新版安装入口，再使用真实程序完成原四种协议的 15 种组合安装、组合调整、参数修改和本地代理请求。systemd 调度及 Quick Tunnel 域名采用模拟实现，服务文件另经 `systemd-analyze verify` 检查；不建立公网隧道，不覆盖真实 systemd 隔离行为。
+
+新增两个协议的 Linux 流量测试（将官方 Linux sing-box 可执行文件放入本地 `test-bin/`）：
+
+```bash
+docker run --rm --init --network none -e FKGFW_CONTAINER_TEST=1 \
+  -e SING_BOX_BINARY=/test-bin/sing-box \
+  --mount type=bind,src="$PWD",dst=/repo,readonly \
+  --mount type=bind,src="$PWD/test-bin",dst=/test-bin,readonly \
+  --workdir /repo fkgfw-smoke:local bash tests/linux-tls.sh
+```
+
+该测试使用本地受信任测试证书替代公网 ACME 签发，检查单独/组合安装、实际 VLESS Vision/AnyTLS 流量、错误证书拒绝、查看配置、域名修改、移除节点与卸载。公网 DNS、Let's Encrypt 签发/续期和真实 systemd 隔离需在实际服务器验证。
 
 清理脚本的最终 Linux 集成测试使用同一镜像，验证真实 `/proc` 识别、pidfd 终止进程、锁、备份和保留范围；systemd 调度模拟。只在一次性容器内运行：
 

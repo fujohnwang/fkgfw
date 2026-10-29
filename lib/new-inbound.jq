@@ -9,6 +9,12 @@ elif .tag == "hy2-in" then
   {type: "hysteria2", tag: .tag, listen: "::", listen_port: .port,
    users: [{password: .password}], tls: {enabled: true, alpn: ["h3"],
      certificate_path: "/etc/sing-box/certs/cert.pem", key_path: "/etc/sing-box/certs/private.key"}}
+elif .tag == "vless-tls-in" or .tag == "anytls-in" then
+  {type: (if .tag == "anytls-in" then "anytls" else "vless" end), tag: .tag,
+   listen: "::", listen_port: .port,
+   users: [(if .tag == "anytls-in" then {name: "default", password: .password}
+            else {uuid: .uuid, flow: "xtls-rprx-vision"} end)],
+   tls: {enabled: true, server_name: .server_name, min_version: "1.2", certificate_provider: "fkgfw-acme"}}
 elif .tag == "vmess-in" or .tag == "vless-ws-in" then
   {type: (if .tag == "vmess-in" then "vmess" else "vless" end), tag: .tag,
    listen: "127.0.0.1", listen_port: .port, users: [{uuid: .uuid}],

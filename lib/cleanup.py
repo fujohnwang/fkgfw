@@ -37,7 +37,8 @@ DIRECT_TUNNELS = {
 }
 UNITS = {name: f'/etc/systemd/system/{name}.service' for name in ['sing-box', 'caddy', 'cloudflared', *DIRECT_TUNNELS]}
 LOGS = ['/var/log/cloudflared.log'] + [value['log'] for value in DIRECT_TUNNELS.values()]
-MANAGED = {'vless-in': 'vless', 'hy2-in': 'hysteria2', 'vmess-in': 'vmess', 'vless-ws-in': 'vless'}
+MANAGED = {'vless-in': 'vless', 'hy2-in': 'hysteria2', 'vmess-in': 'vmess', 'vless-ws-in': 'vless',
+           'vless-tls-in': 'vless', 'anytls-in': 'anytls'}
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,10 @@ class Cleaner:
         if not known or any(i.get('type') != MANAGED[i['tag']] for i in known):
             return False
         for inbound in known:
+            if inbound['tag'] in ['vless-tls-in', 'anytls-in']:
+                tls = inbound.get('tls')
+                if not isinstance(tls, dict) or tls.get('enabled') is not True or tls.get('certificate_provider') != 'fkgfw-acme':
+                    return False
             if inbound['tag'] == 'vless-in':
                 tls = inbound.get('tls')
                 reality = tls.get('reality') if isinstance(tls, dict) else None

@@ -1,6 +1,7 @@
 #!/bin/bash
 source "$SCRIPT_DIR/lib/releases.sh" || return 1
 source "$SCRIPT_DIR/lib/protocols.sh" || return 1
+source "$SCRIPT_DIR/lib/tls.sh" || return 1
 
 create_singbox_user() {
     id -u singbox >/dev/null 2>&1 || useradd -r -s /sbin/nologin -M singbox
@@ -112,7 +113,9 @@ configure_protocols() (
         fi
     done
     jq --argjson selected "$selected" --argjson additions "$(cat "$stage/additions.json")" \
-        -f "$SCRIPT_DIR/lib/server.jq" "$stage/original.json" > "$stage/config.json"
+        -f "$SCRIPT_DIR/lib/server.jq" "$stage/original.json" > "$stage/merged.json"
+    jq -f "$SCRIPT_DIR/lib/acme.jq" "$stage/merged.json" > "$stage/config.json"
+    prepare_managed_tls "$stage/config.json" "$stage/original.json" "$binary"
     old_ws=0; new_ws=0
     has_ws "$stage/original.json" && old_ws=1
     has_ws "$stage/config.json" && new_ws=1
@@ -123,6 +126,10 @@ configure_protocols() (
     fi
     if [ "$new_ws" -eq 1 ] && [ "$old_ws" -eq 0 ]; then
         caddy_port=$(prompt_port 'Caddy 本地反代' "$caddy_port")
+    fi
+    if has_managed_tls "$stage/config.json" && [ "$new_ws" -eq 1 ] && [ "$caddy_port" -eq 80 ]; then
+        echo '错误: Caddy 本地反代不能占用 ACME 所需的 TCP 80。' >&2
+        exit 1
     fi
     validate_listeners "$stage/config.json" "$caddy_port"
     if [ "$new_ws" -eq 1 ]; then
@@ -197,6 +204,7 @@ configure_protocols() (
     mv -f /etc/sing-box/config.json.new /etc/sing-box/config.json
     set_secure_permissions
     if [ ! -f /etc/systemd/system/sing-box.service ]; then write_singbox_service; fi
+    if has_managed_tls "$stage/config.json"; then enable_acme_storage; fi
     if [ "$new_ws" -eq 1 ]; then
         install -d -m 755 /etc/caddy
         install -m 644 "$stage/Caddyfile" /etc/caddy/Caddyfile
@@ -225,6 +233,7 @@ configure_protocols() (
     fi
     sleep 2
     systemctl is-active --quiet sing-box
+    wait_for_tls /etc/sing-box/config.json
     if [ "$new_ws" -eq 1 ]; then
         systemctl is-active --quiet caddy
         systemctl is-active --quiet cloudflared
@@ -294,7 +303,7 @@ installer_main() {
     echo '当前协议：'
     jq -r '.inbounds[].tag' /etc/sing-box/config.json | while read -r tag; do protocol_name "$tag"; done
     echo '1. 调整协议组合（保留仍选中协议的配置）'
-    echo '2. 修改已安装协议的端口 / SNI / WS 路径'
+    echo '2. 修改已安装协议的端口 / SNI / 证书域名 / WS 路径'
     echo '3. 显示客户端配置与分享链接'
     echo '4. 卸载'
     echo '5. 更新所选协议使用的服务端程序'
@@ -308,11 +317,11 @@ installer_main() {
             show_configuration cached
             ;;
         2)
-            echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS'
+            echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS  5=VLESS TLS + Vision  6=AnyTLS'
             read -r -p '选择一个已安装协议: ' choice || return 1
             tag=$(normalize_selection "$choice" | jq -er 'select(length == 1) | .[0]') || return 1
             has_protocol /etc/sing-box/config.json "$tag" || { echo '该协议未安装。' >&2; return 1; }
-            selected=$(jq -c '[.inbounds[].tag | select(. == "vless-in" or . == "hy2-in" or . == "vmess-in" or . == "vless-ws-in")]' /etc/sing-box/config.json)
+            selected=$(managed_tags /etc/sing-box/config.json)
             configure_protocols "$selected" "$tag"
             [ "$?" -eq 0 ] || return 1
             show_configuration cached

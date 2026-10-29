@@ -1,5 +1,5 @@
 # Current sing-box client schema; each managed inbound is optional.
-[.inbounds[] | select(.tag == "vless-in" or .tag == "hy2-in" or .tag == "vmess-in" or .tag == "vless-ws-in")
+[.inbounds[] | select(.tag == "vless-in" or .tag == "hy2-in" or .tag == "vmess-in" or .tag == "vless-ws-in" or .tag == "vless-tls-in" or .tag == "anytls-in")
  | if .tag == "vless-in" then
      if $public_key == "" or $server_ip == "" then error("Missing Reality public key or server address") else . end
      | {type: "vless", tag: "sing-box-reality", server: $server_ip,
@@ -12,6 +12,14 @@
      | {type: "hysteria2", tag: "sing-box-hysteria2", server: $server_ip,
         server_port: .listen_port, password: .users[0].password, up_mbps: 100, down_mbps: 100,
         tls: {enabled: true, server_name: $certificate_name, insecure: true, alpn: ["h3"]}}
+   elif .tag == "vless-tls-in" or .tag == "anytls-in" then
+     if (.tls.server_name // "") == "" then error("Missing TLS domain") else . end
+     | {type: .type, tag: (if .type == "anytls" then "sing-box-anytls" else "sing-box-vless-tls" end),
+        server: .tls.server_name, server_port: .listen_port,
+        tls: {enabled: true, server_name: .tls.server_name, insecure: false,
+              utls: {enabled: true, fingerprint: "chrome"}}}
+       + (if .type == "anytls" then {password: .users[0].password}
+          else {uuid: .users[0].uuid, flow: .users[0].flow, packet_encoding: "xudp"} end)
    else
      if $argo == "" then error("Missing Cloudflare tunnel hostname") else . end
      | {type: .type, tag: (if .type == "vmess" then "sing-box-vmess" else "sing-box-vless-ws" end),

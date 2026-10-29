@@ -2,6 +2,7 @@
 
 has_protocol() { jq -e --arg tag "$2" 'any(.inbounds[]?; .tag == $tag)' "$1" >/dev/null; }
 has_ws() { jq -e 'any(.inbounds[]?; .tag == "vmess-in" or .tag == "vless-ws-in")' "$1" >/dev/null; }
+managed_tags() { jq -c '[.inbounds[].tag | select(. == "vless-in" or . == "hy2-in" or . == "vmess-in" or . == "vless-ws-in" or . == "vless-tls-in" or . == "anytls-in")]' "$1"; }
 
 protocol_name() {
     case "$1" in
@@ -9,15 +10,17 @@ protocol_name() {
         hy2-in) echo Hysteria2 ;;
         vmess-in) echo 'VMess WS' ;;
         vless-ws-in) echo 'VLESS WS' ;;
+        vless-tls-in) echo 'VLESS TLS + Vision' ;;
+        anytls-in) echo AnyTLS ;;
     esac
 }
 
 normalize_selection() {
     jq -cen --arg text "$1" '
-      ["vless-in", "hy2-in", "vmess-in", "vless-ws-in"] as $tags
+      ["vless-in", "hy2-in", "vmess-in", "vless-ws-in", "vless-tls-in", "anytls-in"] as $tags
       | ($text | gsub(","; " ") | split(" ") | map(select(length > 0))) as $ids
-      | if ($ids | length) == 0 or any($ids[]; test("^[1-4]$") | not) then
-          error("Select one or more numbers from 1 to 4")
+      | if ($ids | length) == 0 or any($ids[]; test("^[1-6]$") | not) then
+          error("Select one or more numbers from 1 to 6")
         else [$ids[] | tonumber] | unique | map($tags[. - 1]) end'
 }
 
@@ -30,6 +33,10 @@ choose_protocols() {
     echo '4. VMess WS + VLESS WS' >&2
     echo '5. 全部四种协议' >&2
     echo '6. 自定义多选' >&2
+    echo '7. 仅 VLESS TLS + Vision（自有域名）' >&2
+    echo '8. 仅 AnyTLS（自有域名）' >&2
+    echo '9. VLESS TLS + Vision + AnyTLS' >&2
+    echo '10. 全部六种协议' >&2
     while true; do
         read -r -p "选择组合 [默认 $default]: " choice || return 1
         case "${choice:-$default}" in
@@ -39,11 +46,15 @@ choose_protocols() {
             4) normalize_selection '3 4'; return ;;
             5) normalize_selection '1 2 3 4'; return ;;
             6)
-                echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS' >&2
+                echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS  5=VLESS TLS + Vision  6=AnyTLS' >&2
                 read -r -p '输入编号，空格或逗号分隔，例如 1,4: ' ids || return 1
                 if normalize_selection "$ids"; then return 0; fi
                 ;;
-            *) echo '请输入 1–6。' >&2 ;;
+            7) normalize_selection 5; return ;;
+            8) normalize_selection 6; return ;;
+            9) normalize_selection '5 6'; return ;;
+            10) normalize_selection '1 2 3 4 5 6'; return ;;
+            *) echo '请输入 1–10。' >&2 ;;
         esac
     done
 }
@@ -93,6 +104,8 @@ collect_inbound() (
         hy2-in) default_port=8443 ;;
         vmess-in) default_port=18443 ;;
         vless-ws-in) default_port=18444 ;;
+        vless-tls-in) default_port=9443 ;;
+        anytls-in) default_port=10443 ;;
     esac
     old=$(jq -c --arg tag "$tag" '[.inbounds[]? | select(.tag == $tag)][0] // null' "$previous")
     if [ "$old" != null ]; then default_port=$(jq -r .listen_port <<< "$old"); fi
@@ -104,6 +117,10 @@ collect_inbound() (
                 jq --argjson port "$port" --arg domain "$domain" '.listen_port = $port | if .tls.server_name != $domain then .tls.server_name = $domain | .tls.reality.handshake.server = $domain else . end' <<< "$old"
                 ;;
             hy2-in) jq --argjson port "$port" '.listen_port = $port' <<< "$old" ;;
+            vless-tls-in|anytls-in)
+                domain=$(prompt_tls_domain "$(jq -r .tls.server_name <<< "$old")")
+                jq --argjson port "$port" --arg domain "$domain" '.listen_port = $port | .tls.server_name = $domain' <<< "$old"
+                ;;
             *)
                 ws_path=$(prompt_ws_path "$(jq -r .transport.path <<< "$old")")
                 jq --argjson port "$port" --arg path "$ws_path" '.listen_port = $port | .transport.path = $path' <<< "$old"
@@ -128,6 +145,10 @@ collect_inbound() (
             openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
                 -keyout "$stage/certs/private.key" -out "$stage/certs/cert.pem" -days 36500 -subj "/CN=$domain" >&2
             params=$(jq --arg password "$("$binary" generate rand --hex 16)" '. + {password: $password}' <<< "$params")
+            ;;
+        vless-tls-in|anytls-in)
+            domain=$(prompt_tls_domain)
+            params=$(jq --arg uuid "$("$binary" generate uuid)" --arg password "$("$binary" generate rand --hex 16)" --arg domain "$domain" '. + {uuid: $uuid, password: $password, server_name: $domain}' <<< "$params")
             ;;
         *)
             ws_path=$(prompt_ws_path "/$("$binary" generate rand --hex 6)")

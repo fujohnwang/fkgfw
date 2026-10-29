@@ -3,22 +3,22 @@
 
 install_base() {
     local command missing=0
-    for command in curl jq openssl tar sha256sum flock; do
+    for command in curl jq openssl tar sha256sum flock timeout ss; do
         command -v "$command" >/dev/null 2>&1 || missing=1
     done
     if [ "$missing" -eq 1 ]; then
         if command -v apt-get >/dev/null 2>&1; then
-            apt-get update && apt-get install -y curl jq openssl tar coreutils util-linux ca-certificates || return 1
+            apt-get update && apt-get install -y curl jq openssl tar coreutils util-linux ca-certificates iproute2 || return 1
         elif command -v dnf >/dev/null 2>&1; then
-            dnf install -y curl jq openssl tar coreutils util-linux ca-certificates || return 1
+            dnf install -y curl jq openssl tar coreutils util-linux ca-certificates iproute || return 1
         elif command -v yum >/dev/null 2>&1; then
-            yum install -y curl jq openssl tar coreutils util-linux ca-certificates || return 1
+            yum install -y curl jq openssl tar coreutils util-linux ca-certificates iproute || return 1
         else
-            echo "错误: 请先安装 curl、jq、openssl、tar、coreutils、util-linux 和 CA 证书" >&2
+            echo "错误: 请先安装 curl、jq、openssl、tar、coreutils、util-linux、iproute2 和 CA 证书" >&2
             return 1
         fi
     fi
-    for command in curl jq openssl tar sha256sum flock; do
+    for command in curl jq openssl tar sha256sum flock timeout ss; do
         command -v "$command" >/dev/null 2>&1 || return 1
     done
 }
@@ -182,6 +182,9 @@ update_component() (
         install -o root -g root -m 755 "$SCRIPT_DIR/lib/cloudflared-post-start.sh" /usr/local/bin/cloudflared-post-start.sh
     fi
     if systemctl daemon-reload && systemctl restart "$component" && sleep 2 && systemctl is-active --quiet "$component"; then
+        if [ "$component" = sing-box ] && declare -F wait_for_tls >/dev/null; then
+            wait_for_tls "$config" || exit 1
+        fi
         echo "✓ $component 升级成功"
     else
         exit 1

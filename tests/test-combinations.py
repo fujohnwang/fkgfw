@@ -81,7 +81,7 @@ export_clients() {
         result = self.call("normalize_selection '4,1 4'")
         self.assert_success(result)
         self.assertEqual(json.loads(result.stdout), ['vless-in', 'vless-ws-in'])
-        for value in ['', '0', '5', '1x', '1;echo']:
+        for value in ['', '0', '7', '1x', '1;echo']:
             result = self.call('normalize_selection ' + repr(value))
             self.assertNotEqual(result.returncode, 0)
 

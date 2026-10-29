@@ -1,6 +1,6 @@
 # Merge protocol selections into the existing server. Other inbounds and
 # unrelated settings survive; retained managed inbounds are copied verbatim.
-def managed: ["vless-in", "hy2-in", "vmess-in", "vless-ws-in"];
+def managed: ["vless-in", "hy2-in", "vmess-in", "vless-ws-in", "vless-tls-in", "anytls-in"];
 def list: if type == "array" then . else [.] end;
 def prune($removed):
   map(if .type == "logical" then
