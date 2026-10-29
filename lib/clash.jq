@@ -1,7 +1,9 @@
 # Shared Clash Meta / Mihomo data; export both JSON and YAML from this object.
 [.outbounds[] | select(.tag | startswith("sing-box-"))
  | {name: .tag, type: .type, server: .server, port: .server_port, udp: true}
-   + (if .type == "hysteria2" then
+   + (if .type == "shadowsocks" then
+       {type: "ss", cipher: .method, password: .password}
+      elif .type == "hysteria2" then
        {password: .password, sni: .tls.server_name, "skip-cert-verify": .tls.insecure}
       elif .type == "anytls" then
        {password: .password, sni: .tls.server_name, "skip-cert-verify": false, "client-fingerprint": "chrome"}

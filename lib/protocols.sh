@@ -2,7 +2,7 @@
 
 has_protocol() { jq -e --arg tag "$2" 'any(.inbounds[]?; .tag == $tag)' "$1" >/dev/null; }
 has_ws() { jq -e 'any(.inbounds[]?; .tag == "vmess-in" or .tag == "vless-ws-in")' "$1" >/dev/null; }
-managed_tags() { jq -c '[.inbounds[].tag | select(. == "vless-in" or . == "hy2-in" or . == "vmess-in" or . == "vless-ws-in" or . == "vless-tls-in" or . == "anytls-in")]' "$1"; }
+managed_tags() { jq -c '[.inbounds[].tag | select(. == "vless-in" or . == "hy2-in" or . == "vmess-in" or . == "vless-ws-in" or . == "vless-tls-in" or . == "anytls-in" or . == "ss-in")]' "$1"; }
 
 protocol_name() {
     case "$1" in
@@ -12,31 +12,37 @@ protocol_name() {
         vless-ws-in) echo 'VLESS WS' ;;
         vless-tls-in) echo 'VLESS TLS + Vision' ;;
         anytls-in) echo AnyTLS ;;
+        ss-in) echo 'Shadowsocks 2022 (AES-256-GCM)' ;;
     esac
 }
 
 normalize_selection() {
     jq -cen --arg text "$1" '
-      ["vless-in", "hy2-in", "vmess-in", "vless-ws-in", "vless-tls-in", "anytls-in"] as $tags
+      ["vless-in", "hy2-in", "vmess-in", "vless-ws-in", "vless-tls-in", "anytls-in", "ss-in"] as $tags
       | ($text | gsub(","; " ") | split(" ") | map(select(length > 0))) as $ids
-      | if ($ids | length) == 0 or any($ids[]; test("^[1-6]$") | not) then
-          error("Select one or more numbers from 1 to 6")
+      | if ($ids | length) == 0 or any($ids[]; test("^[1-7]$") | not) then
+          error("Select one or more numbers from 1 to 7")
         else [$ids[] | tonumber] | unique | map($tags[. - 1]) end'
 }
 
 choose_protocols() {
-    local default="$1" choice ids
+    local default="$1" existing="${2:-[]}" choice ids
     echo '选择协议组合：' >&2
     echo '1. 仅 Reality' >&2
     echo '2. 仅 Hysteria2' >&2
     echo '3. Reality + Hysteria2' >&2
     echo '4. VMess WS + VLESS WS' >&2
-    echo '5. 全部四种协议' >&2
+    echo '5. 原四种协议（Reality + Hysteria2 + VMess WS + VLESS WS）' >&2
     echo '6. 自定义多选' >&2
     echo '7. 仅 VLESS TLS + Vision（自有域名）' >&2
     echo '8. 仅 AnyTLS（自有域名）' >&2
     echo '9. VLESS TLS + Vision + AnyTLS' >&2
-    echo '10. 全部六种协议' >&2
+    echo '10. 全部七种协议（含 Shadowsocks）' >&2
+    if [ "$existing" = '[]' ]; then
+        echo '11. 仅 Shadowsocks 2022（AES-256-GCM）' >&2
+    else
+        echo '11. 增加 Shadowsocks 2022（AES-256-GCM，保留已安装协议）' >&2
+    fi
     while true; do
         read -r -p "选择组合 [默认 $default]: " choice || return 1
         case "${choice:-$default}" in
@@ -46,15 +52,16 @@ choose_protocols() {
             4) normalize_selection '3 4'; return ;;
             5) normalize_selection '1 2 3 4'; return ;;
             6)
-                echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS  5=VLESS TLS + Vision  6=AnyTLS' >&2
+                echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS  5=VLESS TLS + Vision  6=AnyTLS  7=Shadowsocks' >&2
                 read -r -p '输入编号，空格或逗号分隔，例如 1,4: ' ids || return 1
                 if normalize_selection "$ids"; then return 0; fi
                 ;;
             7) normalize_selection 5; return ;;
             8) normalize_selection 6; return ;;
             9) normalize_selection '5 6'; return ;;
-            10) normalize_selection '1 2 3 4 5 6'; return ;;
-            *) echo '请输入 1–10。' >&2 ;;
+            10) normalize_selection '1 2 3 4 5 6 7'; return ;;
+            11) jq -cen --argjson existing "$existing" '$existing | if index("ss-in") == null then . + ["ss-in"] else . end'; return ;;
+            *) echo '请输入 1–11。' >&2 ;;
         esac
     done
 }
@@ -106,6 +113,7 @@ collect_inbound() (
         vless-ws-in) default_port=18444 ;;
         vless-tls-in) default_port=9443 ;;
         anytls-in) default_port=10443 ;;
+        ss-in) default_port=8388 ;;
     esac
     old=$(jq -c --arg tag "$tag" '[.inbounds[]? | select(.tag == $tag)][0] // null' "$previous")
     if [ "$old" != null ]; then default_port=$(jq -r .listen_port <<< "$old"); fi
@@ -116,7 +124,7 @@ collect_inbound() (
                 domain=$(prompt_domain 'Reality SNI' "$(jq -r .tls.server_name <<< "$old")")
                 jq --argjson port "$port" --arg domain "$domain" '.listen_port = $port | if .tls.server_name != $domain then .tls.server_name = $domain | .tls.reality.handshake.server = $domain else . end' <<< "$old"
                 ;;
-            hy2-in) jq --argjson port "$port" '.listen_port = $port' <<< "$old" ;;
+            hy2-in|ss-in) jq --argjson port "$port" '.listen_port = $port' <<< "$old" ;;
             vless-tls-in|anytls-in)
                 domain=$(prompt_tls_domain "$(jq -r .tls.server_name <<< "$old")")
                 jq --argjson port "$port" --arg domain "$domain" '.listen_port = $port | .tls.server_name = $domain' <<< "$old"
@@ -150,6 +158,11 @@ collect_inbound() (
             domain=$(prompt_tls_domain)
             params=$(jq --arg uuid "$("$binary" generate uuid)" --arg password "$("$binary" generate rand --hex 16)" --arg domain "$domain" '. + {uuid: $uuid, password: $password, server_name: $domain}' <<< "$params")
             ;;
+        ss-in)
+            password=$("$binary" generate rand --base64 32)
+            params=$(jq --arg password "$password" '. + {password: $password}' <<< "$params")
+            echo "请放行公网 TCP/UDP ${port}；Shadowsocks 不需要域名和证书。" >&2
+            ;;
         *)
             ws_path=$(prompt_ws_path "/$("$binary" generate rand --hex 6)")
             params=$(jq --arg uuid "$("$binary" generate uuid)" --arg path "$ws_path" '. + {uuid: $uuid, path: $path}' <<< "$params")
@@ -162,7 +175,13 @@ validate_listeners() {
     local config="$1" caddy_port="$2"
     jq -e --argjson caddy_port "$caddy_port" '
       [.inbounds[] | select(.listen_port != null)
-        | {port: .listen_port, network: (if .type == "hysteria2" then "udp" else "tcp" end)}] as $ports
+        | . as $inbound
+        | (if .type == "hysteria2" then ["udp"]
+           elif .type == "shadowsocks" then
+             if (.network // "") == "" or .network == [] then ["tcp", "udp"]
+             elif (.network | type) == "array" then .network else [.network] end
+           else ["tcp"] end)[] as $network
+        | {port: $inbound.listen_port, network: $network}] as $ports
       | (all($ports[]; .port >= 1 and .port <= 65535))
         and (($ports | unique | length) == ($ports | length))
         and (if any(.inbounds[]; .tag == "vmess-in" or .tag == "vless-ws-in") then

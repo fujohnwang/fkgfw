@@ -15,6 +15,9 @@ elif .tag == "vless-tls-in" or .tag == "anytls-in" then
    users: [(if .tag == "anytls-in" then {name: "default", password: .password}
             else {uuid: .uuid, flow: "xtls-rprx-vision"} end)],
    tls: {enabled: true, server_name: .server_name, min_version: "1.2", certificate_provider: "fkgfw-acme"}}
+elif .tag == "ss-in" then
+  {type: "shadowsocks", tag: .tag, listen: "::", listen_port: .port,
+   method: "2022-blake3-aes-256-gcm", password: .password}
 elif .tag == "vmess-in" or .tag == "vless-ws-in" then
   {type: (if .tag == "vmess-in" then "vmess" else "vless" end), tag: .tag,
    listen: "127.0.0.1", listen_port: .port, users: [{uuid: .uuid}],

@@ -13,18 +13,20 @@ pair=$("$binary" generate reality-keypair)
 private_key=$(awk '/PrivateKey/ {print $2}' <<< "$pair")
 public_key=$(awk '/PublicKey/ {print $2}' <<< "$pair")
 uuid=$("$binary" generate uuid)
-tags='["vless-in","hy2-in","vmess-in","vless-ws-in","vless-tls-in","anytls-in"]'
-jq -n --argjson tags "$tags" --arg uuid "$uuid" --arg key "$private_key" '
-  range(0;6) as $i | {tag:$tags[$i],port:(12000+$i),uuid:$uuid,private_key:$key,
-  server_name:"example.com",short_id:"0123456789abcdef",password:"00@a:# /?",path:("/ws"+($i|tostring))}' |
+tags='["vless-in","hy2-in","vmess-in","vless-ws-in","vless-tls-in","anytls-in","ss-in"]'
+ss_key=$("$binary" generate rand --base64 32)
+jq -n --argjson tags "$tags" --arg uuid "$uuid" --arg key "$private_key" --arg ss_key "$ss_key" '
+  range(0;7) as $i | {tag:$tags[$i],port:(12000+$i),uuid:$uuid,private_key:$key,
+  server_name:"example.com",short_id:"0123456789abcdef",password:(if $i == 6 then $ss_key else "00@a:# /?" end),path:("/ws"+($i|tostring))}' |
   jq -f "$SCRIPT_DIR/lib/new-inbound.jq" | jq -s --arg cert "$work/cert.pem" --arg key "$work/key.pem" \
   'map(if .tag == "hy2-in" then .tls.certificate_path=$cert | .tls.key_path=$key else . end)' > "$work/inbounds.json"
 printf '%s\n' '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}' > "$work/base.json"
-for mask in $(seq 1 63); do
+for mask in $(seq 1 127); do
     selected=$(jq -cn --argjson tags "$tags" --argjson mask "$mask" \
-        '[range(0;6) as $i | select(($mask / pow(2;$i) | floor) % 2 == 1) | $tags[$i]]')
+        '[range(0;7) as $i | select(($mask / pow(2;$i) | floor) % 2 == 1) | $tags[$i]]')
     jq --argjson selected "$selected" --argjson additions "$(cat "$work/inbounds.json")" \
         -f "$SCRIPT_DIR/lib/server.jq" "$work/base.json" | jq -f "$SCRIPT_DIR/lib/acme.jq" > "$work/server.json"
+    validate_listeners "$work/server.json" 28080
     "$binary" check -c "$work/server.json"
     jq --arg server_ip 2001:db8::1 --arg public_key "$public_key" --arg certificate_name example.com \
         --arg argo test.trycloudflare.com -f "$SCRIPT_DIR/lib/client.jq" "$work/server.json" > "$work/client.json"
@@ -34,9 +36,10 @@ for mask in $(seq 1 63); do
     jq -r -f "$SCRIPT_DIR/lib/links.jq" "$work/client.json" > "$work/links.txt"
     count=$(jq length <<< "$selected")
     [ "$(wc -l < "$work/links.txt" | tr -d ' ')" = "$count" ]
-    jq -e --argjson count "$count" --arg uuid "$uuid" '
+    jq -e --argjson count "$count" --arg uuid "$uuid" --arg ss_key "$ss_key" '
       (.proxies|length) == $count and all(.proxies[];
-        if .type == "anytls" then .password == "00@a:# /?" and .sni == "example.com" and ."skip-cert-verify" == false
+        if .type == "ss" then .password == $ss_key and .cipher == "2022-blake3-aes-256-gcm" and .udp and (has("tls")|not)
+        elif .type == "anytls" then .password == "00@a:# /?" and .sni == "example.com" and ."skip-cert-verify" == false
         elif .name == "sing-box-vless-tls" then .uuid == $uuid and .flow == "xtls-rprx-vision" and .network == "tcp" and ."skip-cert-verify" == false and (has("reality-opts")|not)
         else true end)' "$work/clash.json" >/dev/null
     if has_protocol "$work/server.json" anytls-in; then
@@ -52,10 +55,11 @@ for mask in $(seq 1 63); do
     jq --argjson selected '["vless-in"]' --argjson additions '[]' -f "$SCRIPT_DIR/lib/server.jq" "$work/all.json" |
         jq -f "$SCRIPT_DIR/lib/acme.jq" | jq -e 'has("certificate_providers")|not' >/dev/null
 done
-echo 'PASS 63 server/client configurations, shared ACME, exports and protocol transitions'
+echo 'PASS 127 server/client configurations, shared ACME, exports and protocol transitions'
 
 normalize_selection '6,5 6' | jq -e '. == ["vless-tls-in","anytls-in"]' >/dev/null
-if normalize_selection 7 >/dev/null 2>&1; then exit 1; fi
+normalize_selection '7,2 7' | jq -e '. == ["hy2-in","ss-in"]' >/dev/null
+if normalize_selection 8 >/dev/null 2>&1; then exit 1; fi
 [ "$(prompt_tls_domain <<< $'\n127.0.0.1\n*.example.com\nTLS.Example.COM')" = tls.example.com ]
 [ "$(printf '%s\n' 2001:0db8:0:0:0:0:0:1 | ip_key)" = "$(printf '%s\n' 2001:db8::1 | ip_key)" ]
 

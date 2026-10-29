@@ -1,5 +1,5 @@
 # Current sing-box client schema; each managed inbound is optional.
-[.inbounds[] | select(.tag == "vless-in" or .tag == "hy2-in" or .tag == "vmess-in" or .tag == "vless-ws-in" or .tag == "vless-tls-in" or .tag == "anytls-in")
+[.inbounds[] | select(.tag == "vless-in" or .tag == "hy2-in" or .tag == "vmess-in" or .tag == "vless-ws-in" or .tag == "vless-tls-in" or .tag == "anytls-in" or .tag == "ss-in")
  | if .tag == "vless-in" then
      if $public_key == "" or $server_ip == "" then error("Missing Reality public key or server address") else . end
      | {type: "vless", tag: "sing-box-reality", server: $server_ip,
@@ -20,6 +20,10 @@
               utls: {enabled: true, fingerprint: "chrome"}}}
        + (if .type == "anytls" then {password: .users[0].password}
           else {uuid: .users[0].uuid, flow: .users[0].flow, packet_encoding: "xudp"} end)
+   elif .tag == "ss-in" then
+     if $server_ip == "" then error("Missing Shadowsocks server address") else . end
+     | {type: "shadowsocks", tag: "sing-box-shadowsocks", server: $server_ip,
+        server_port: .listen_port, method: .method, password: .password}
    else
      if $argo == "" then error("Missing Cloudflare tunnel hostname") else . end
      | {type: .type, tag: (if .type == "vmess" then "sing-box-vmess" else "sing-box-vless-ws" end),

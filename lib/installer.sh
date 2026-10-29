@@ -20,7 +20,7 @@ server_address() {
 export_clients() (
     set -e
     export_address="${1:-}"
-    if has_protocol /etc/sing-box/config.json vless-in || has_protocol /etc/sing-box/config.json hy2-in; then
+    if has_protocol /etc/sing-box/config.json vless-in || has_protocol /etc/sing-box/config.json hy2-in || has_protocol /etc/sing-box/config.json ss-in; then
         [ -n "$export_address" ] || export_address=$(server_address)
     fi
     export_stage=$(mktemp -d /etc/sing-box/.export.XXXXXX)
@@ -152,7 +152,7 @@ configure_protocols() (
         "$stage/config.json" > "$stage/check.json"
     "$binary" check -c "$stage/check.json"
     public_address=""
-    if has_protocol "$stage/config.json" vless-in || has_protocol "$stage/config.json" hy2-in; then
+    if has_protocol "$stage/config.json" vless-in || has_protocol "$stage/config.json" hy2-in || has_protocol "$stage/config.json" ss-in; then
         public_address=$(server_address)
     fi
     if [ "$old_ws" -eq 1 ] || [ "$new_ws" -eq 1 ]; then
@@ -311,13 +311,13 @@ installer_main() {
     read -r -p '选择操作: ' choice || return 1
     case "$choice" in
         1)
-            selected=$(choose_protocols "$preset") || return 1
+            selected=$(choose_protocols "$preset" "$(managed_tags /etc/sing-box/config.json)") || return 1
             configure_protocols "$selected"
             [ "$?" -eq 0 ] || return 1
             show_configuration cached
             ;;
         2)
-            echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS  5=VLESS TLS + Vision  6=AnyTLS'
+            echo '1=Reality  2=Hysteria2  3=VMess WS  4=VLESS WS  5=VLESS TLS + Vision  6=AnyTLS  7=Shadowsocks'
             read -r -p '选择一个已安装协议: ' choice || return 1
             tag=$(normalize_selection "$choice" | jq -er 'select(length == 1) | .[0]') || return 1
             has_protocol /etc/sing-box/config.json "$tag" || { echo '该协议未安装。' >&2; return 1; }

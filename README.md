@@ -1,6 +1,6 @@
 # sing-box 协议组合安装脚本
 
-支持 **Reality、Hysteria2、VMess WS、VLESS WS、VLESS TLS + Vision、AnyTLS** 六种协议的任意非空组合，共 63 种。WebSocket 通过 Caddy + Cloudflare Quick Tunnel 接入。
+支持 **Reality、Hysteria2、VMess WS、VLESS WS、VLESS TLS + Vision、AnyTLS、Shadowsocks 2022（AES-256-GCM）** 七种协议的任意非空组合，共 127 种。WebSocket 通过 Caddy + Cloudflare Quick Tunnel 接入。
 
 ## 安装
 
@@ -20,14 +20,15 @@ sudo bash install.sh
 | 2 | 仅 Hysteria2 |
 | 3 | Reality + Hysteria2 |
 | 4 | VMess WS + VLESS WS |
-| 5 | 全部四种 |
+| 5 | 原四种：Reality + Hysteria2 + VMess WS + VLESS WS |
 | 6 | 自定义多选 |
 | 7 | 仅 VLESS TLS + Vision |
 | 8 | 仅 AnyTLS |
 | 9 | VLESS TLS + Vision + AnyTLS |
-| 10 | 全部六种 |
+| 10 | 全部七种（含 Shadowsocks） |
+| 11 | Shadowsocks 2022（AES-256-GCM）：新部署单独安装，已有部署追加 |
 
-自定义模式中，`1=Reality`、`2=Hysteria2`、`3=VMess WS`、`4=VLESS WS`、`5=VLESS TLS + Vision`、`6=AnyTLS`。例如输入 `2,5,6` 安装 Hysteria2 + VLESS TLS + Vision + AnyTLS。原有默认组合和菜单 1–6 的含义保留。
+自定义模式中，`1=Reality`、`2=Hysteria2`、`3=VMess WS`、`4=VLESS WS`、`5=VLESS TLS + Vision`、`6=AnyTLS`、`7=Shadowsocks`。例如输入 `2,5,6,7` 安装 Hysteria2 + VLESS TLS + Vision + AnyTLS + Shadowsocks。原有默认组合和菜单 1–6 的含义保留。
 
 两个入口都支持全部组合，也能管理对方创建的安装：
 
@@ -43,6 +44,14 @@ sudo bash install.sh
 ```bash
 sudo env SERVER_ADDRESS=203.0.113.10 bash install.sh
 ```
+
+### Shadowsocks 2022
+
+选择安装选项 **11**，固定使用 `2022-blake3-aes-256-gcm`，自动生成 32 字节随机密钥并以 Base64 保存。只需填写端口，默认 **8388/TCP+UDP**；无需域名、证书、Caddy 或 Cloudflare Tunnel。请在服务器防火墙放行所选端口的 TCP 和 UDP，脚本不修改防火墙。
+
+已有安装通过管理菜单 **1 → 11** 追加 Shadowsocks，保留全部已安装协议及其配置；SS 已安装时也保留原端口和密钥。选择组合 **10** 会安装全部七种协议，自定义组合 **6** 中可用编号 **7** 选择 SS。选择管理菜单 **2 → 7** 可以修改 Shadowsocks 端口并保留密钥，菜单 **3** 根据当前安装重新导出 `ss://` 链接、sing-box JSON、Mihomo JSON/YAML。
+
+客户端需支持 Shadowsocks 2022；分享链接按 SIP002 对密钥进行百分号编码。该节点直接连接服务器，不经过 CDN。后续管理和卸载使用新版安装入口，无需再次运行一次性 `migration.sh`。
 
 ### 自有域名 TLS 协议
 
@@ -71,7 +80,7 @@ VLESS TLS + Vision 和 AnyTLS 均使用普通 TLS、受信任证书和服务器�
 | 5 | 更新当前组合所需的服务端程序 |
 | 6 | 重启 Quick Tunnel，仅在安装了 WS 协议时显示 |
 
-调整组合时，输入**最终希望保留的所有协议**：仍选中的协议保留端口、用户、密钥和其他 inbound 参数，只询问新增协议的参数。移除后重新添加的协议会生成新的认证信息。
+调整组合时，输入**最终希望保留的所有协议**：仍选中的协议保留端口、用户、密钥和其他 inbound 参数，只询问新增协议的参数。选项 **11** 专门用于追加 Shadowsocks，不移除已有协议。移除后重新添加的协议会生成新的认证信息。
 
 移除最后一个 WS 协议会停止并禁用 Caddy 和 cloudflared，保留程序及配置以便以后重用。Caddy 路由及辅助服务定义会按当前 WS 选择重新生成。只修改 WS 后端时保留正在运行的隧道；重启隧道可能改变公网域名，需要更新客户端链接。
 
@@ -141,11 +150,14 @@ python3 tests/test-client-exports.py
 SING_BOX_BINARY=/path/to/sing-box python3 tests/check-configs.py
 SING_BOX_BINARY=/path/to/sing-box bash tests/test-tls.sh
 SING_BOX_BINARY=/path/to/sing-box bash tests/test-tls-transaction.sh
+SING_BOX_BINARY=/path/to/sing-box bash tests/test-shadowsocks.sh
 ```
 
 配置测试使用真实 sing-box 检查 15 种组合，并检查 225 种切换的参数保留、分享链接、Mihomo 节点及 YAML/JSON 内容一致性。客户端导出与配置测试需要 PyYAML（Debian/Ubuntu 开发环境可安装 `python3-yaml`，下面的测试镜像已包含）；服务器导出仅使用已有 jq。故障测试使用隔离目录和模拟服务。
 
-新增 Bash 测试覆盖六种协议的 63 种配置、共享证书 provider、域名/DNS 校验、新节点导出，以及证书失败的事务回滚和保留凭据的域名修改。
+新增 Bash 测试覆盖七种协议的 127 种配置、共享证书 provider、域名/DNS 校验、新节点导出，以及证书失败的事务回滚和保留凭据的域名修改。
+
+Shadowsocks 的 Bash 测试覆盖 256 位密钥生成、双网络端口冲突、IPv4/IPv6 分享链接、JSON/YAML 导出、修改端口保留密钥及导出失败回滚。
 
 最终 Linux 安装与本地流量测试（需要 Docker）：
 
@@ -169,6 +181,8 @@ docker run --rm --init --network none -e FKGFW_CONTAINER_TEST=1 \
 ```
 
 该测试使用本地受信任测试证书替代公网 ACME 签发，检查单独/组合安装、实际 VLESS Vision/AnyTLS 流量、错误证书拒绝、查看配置、域名修改、移除节点与卸载。公网 DNS、Let's Encrypt 签发/续期和真实 systemd 隔离需在实际服务器验证。
+
+使用相同 Docker 命令，将末尾的 `bash tests/linux-tls.sh` 换为 `bash tests/linux-shadowsocks.sh`，验证两个入口的 Shadowsocks 安装、追加时保留已有协议、真实 TCP/UDP 代理流量、错误密钥拒绝、端口修改、查看和卸载；无需公网连接。
 
 清理脚本的最终 Linux 集成测试使用同一镜像，验证真实 `/proc` 识别、pidfd 终止进程、锁、备份和保留范围；systemd 调度模拟。只在一次性容器内运行：
 

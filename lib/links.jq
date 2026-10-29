@@ -6,6 +6,9 @@ def host: if contains(":") then "[" + . + "]" else . end;
     "vless://\(.uuid)@\(.server | host):\(.server_port)?encryption=none&flow=xtls-rprx-vision&security=tls&sni=\(.tls.server_name | @uri)&fp=chrome&type=tcp#VLESS-TLS-Vision"
   elif .tag == "sing-box-anytls" then
     "anytls://\(.password | @uri)@\(.server | host):\(.server_port)/?sni=\(.tls.server_name | @uri)&insecure=0#AnyTLS"
+  elif .tag == "sing-box-shadowsocks" then
+    # SIP002: AEAD-2022 userinfo must use percent encoding, not Base64URL.
+    "ss://\(.method | @uri):\(.password | @uri)@\(.server | host):\(.server_port)#Shadowsocks-2022"
   elif .tag == "sing-box-hysteria2" then
     "hysteria2://\(.password | @uri)@\(.server | host):\(.server_port)?insecure=1&sni=\(.tls.server_name | @uri)#Hysteria2"
   elif .tag == "sing-box-vmess" then
