@@ -1,6 +1,6 @@
 # DSVPN 部署制品
 
-节点从本仓库固定的 `artifacts/dsvpn/latest/` 运行 DSVPN。服务启动时校验文件，并在同一文件系统上通过硬链接保留本次启动的制品。节点执行 `git pull` 时，当前 VPN 和客户端下载继续使用相同的文件。请保留可写、由 root 管理的 checkout。
+节点每次启动 DSVPN 时，把本机仓库 `artifacts/dsvpn/latest/` 中的制品同步到 root 管理的 `/opt/fkgfw-dsvpn`，校验 SHA-256 后一起启用 VPN 和配套下载。首次执行 `sudo ./install.sh` 的部署账号 UID 保存在 `/etc/fkgfw-dsvpn/deploy.uid`。该账号可在自己的 checkout 执行 `git pull`，再用 `sudo systemctl restart fkgfw-dsvpn` 启用新版。
 
 ## 目录
 

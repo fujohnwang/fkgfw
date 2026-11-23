@@ -14,6 +14,12 @@ live=${FKGFW_DSVPN_LIVE_TUNNEL:-0}
 metrics_dir=''
 ns=fkgfw-dsvpn-test
 peer_pid=''
+operator=()
+deploy_uid=${SUDO_UID:-0}
+if [[ "$deploy_uid" != 0 ]]; then
+    operator=(setpriv --reuid="$deploy_uid" --regid="$(id -g "$deploy_uid")" --init-groups --)
+    chmod 711 "$work"
+fi
 finish() {
     if [[ -n $peer_pid ]]; then kill "$peer_pid" 2>/dev/null || true; wait "$peer_pid" || true; fi
     ip netns del "$ns" 2>/dev/null || true
@@ -25,19 +31,21 @@ finish() {
     if [ -n "$metrics_dir" ]; then rm -rf "$metrics_dir"; fi
 }
 trap finish EXIT
-# Exercise repository paths with spaces and a private parent directory.
-mkdir "$work/test checkout"
-tar -C "$repo" --exclude=.git -cf - . | tar --no-same-owner -C "$work/test checkout" -xf -
+# Clone as the invoking account. All Git history here is local to the fixture.
+mkdir "$work/publisher"
+tar -C "$repo" --exclude=.git -cf - . | tar --no-same-owner -C "$work/publisher" -xf -
+chown -R "$deploy_uid:$(id -g "$deploy_uid")" "$work/publisher"
+project_git() { "${operator[@]}" git -C "$1" "${@:2}"; }
+fixture_commit() { project_git "$1" -c user.name=Fixture -c user.email=test@localhost commit -qm "$2"; }
+project_git "$work/publisher" init -q -b main
+project_git "$work/publisher" add .
+fixture_commit "$work/publisher" original
 repo="$work/test checkout"
+install -d -m 700 -o "$deploy_uid" -g "$(id -g "$deploy_uid")" "$repo"
+"${operator[@]}" git clone -q --no-local "$work/publisher" "$repo"
 release="$repo/artifacts/dsvpn/latest"
 old="$work/original"
 cp -al "$release" "$old"
-# The git history exists only in this disposable fixture.
-git -C "$repo" init -q -b main
-git -C "$repo" add artifacts/dsvpn/latest
-fixture_commit() { git -C "$1" -c user.name=Fixture -c user.email=test@localhost commit -qm "$2"; }
-fixture_commit "$repo" original
-git clone -q "$repo" "$work/publisher"
 candidate="$work/publisher/artifacts/dsvpn/latest"
 if [ "$live" != 1 ]; then
     # A local connector status fixture keeps private development builds off the public Internet.
@@ -57,11 +65,28 @@ fi
 invoke() {
     printf '%s\n' "$2" | bash "$repo/$1" "${@:3}" > "$work/log" 2>&1 || { cat "$work/log"; return 1; }
 }
+license="$release/clients/LICENSE"
+original_mode=$(stat -c %a "$license")
+chmod o+w "$license"
+if bash "$repo/lib/dsvpn-release.sh" verify "$repo/artifacts/dsvpn" "$deploy_uid" > "$work/path.log" 2>&1; then exit 1; fi
+grep -Fq '其他账号可写入' "$work/path.log"
+chmod "$original_mode" "$license"
+if [[ "$deploy_uid" != 0 ]]; then
+    chown nobody "$license"
+    if bash "$repo/lib/dsvpn-release.sh" verify "$repo/artifacts/dsvpn" "$deploy_uid" > "$work/path.log" 2>&1; then exit 1; fi
+    grep -Fq '未获部署授权' "$work/path.log"
+    # Mixed ownership also occurs after a sudo git pull.
+    chown root:root "$license"
+    chmod 644 "$license"
+fi
 invoke install.sh $'12\n\n\n'
+[[ $(cat "$cfg/deploy.uid") = "$deploy_uid" && $(stat -c '%u:%a' "$cfg/deploy.uid") = 0:600 ]]
+[[ $(stat -c '%u:%a' /opt/fkgfw-dsvpn) = 0:700 && ! -e "$repo/artifacts/dsvpn/.fkgfw-dsvpn-running" ]]
+cmp "$license" /run/fkgfw-dsvpn/release/clients/LICENSE
 systemd-analyze verify "$service.service" "$download.service" "$tunnel.service"
 for unit in "$service" "$download" "$tunnel"; do systemctl is-enabled --quiet "$unit"; systemctl is-active --quiet "$unit"; done
-[[ ! -e /etc/sing-box/config.json && ! -e /opt/fkgfw-dsvpn ]]
-[[ "/run/fkgfw-dsvpn/release/clients/SHA256SUMS" -ef "$release/clients/SHA256SUMS" ]]
+[[ ! -e /etc/sing-box/config.json && "/run/fkgfw-dsvpn/release" -ef /opt/fkgfw-dsvpn/release ]]
+[[ ! "/run/fkgfw-dsvpn/release/clients/SHA256SUMS" -ef "$release/clients/SHA256SUMS" ]]
 key=$(sha256sum "$cfg/vpn.key")
 [[ $(stat -c '%u:%a:%s' "$cfg/vpn.key") = 0:600:32 ]]
 bundle=$(sha256sum < "$release/clients/SHA256SUMS" | cut -d' ' -f1)
@@ -95,7 +120,10 @@ systemctl start "$download"
 [[ $(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' http://127.0.0.1:1960/vpn.key) = 404 ]]
 case "$(uname -m)" in x86_64) arch=linux-amd64 ;; aarch64) arch=linux-arm64 ;; *) exit 2 ;; esac
 check_inodes() {
-    local pinned=$1 pid
+    local expected=$1 pinned=/opt/fkgfw-dsvpn/release pid
+    cmp "$expected/clients/SHA256SUMS" "$pinned/clients/SHA256SUMS"
+    cmp "$expected/clients/$arch/dsvpn" "$pinned/clients/$arch/dsvpn"
+    [[ $(stat -c '%u:%a' "$pinned/clients/$arch/dsvpn") = 0:755 ]]
     pid=$(systemctl show "$service" -p MainPID --value)
     [[ $(stat -Lc '%d:%i' "/proc/$pid/exe") = "$(stat -Lc '%d:%i' "$pinned/clients/$arch/dsvpn")" ]]
     pid=$(systemctl show "$download" -p MainPID --value)
@@ -129,9 +157,9 @@ for transport in TCP KCP/UDP; do
         else
             printf '\n' >> "$candidate/clients/LICENSE"
         fi
-        git -C "$work/publisher" add artifacts/dsvpn/latest
+        project_git "$work/publisher" add artifacts/dsvpn/latest
         fixture_commit "$work/publisher" update
-        git -C "$repo" pull --ff-only "$work/publisher" main
+        project_git "$repo" pull --ff-only
         next_bundle=$(sha256sum < "$release/clients/SHA256SUMS" | cut -d' ' -f1)
         old_bundle=$bundle
         [[ "$live" = 1 || "$old_bundle" != "$next_bundle" ]]
@@ -174,9 +202,11 @@ curl -fsS --noproxy '*' "http://127.0.0.1:2960/$bundle/$arch/dsvpn" | cmp - "$re
 invoke install.sh $'3\nno' dsvpn
 systemctl is-active --quiet "$service"
 mv "$release/clients/macos-arm64/dsvpn" "$work/good-client"
-cp "$work/good-client" "$release/clients/macos-arm64/dsvpn"
+install -m 755 -o "$deploy_uid" -g "$(id -g "$deploy_uid")" "$work/good-client" "$release/clients/macos-arm64/dsvpn"
 printf x >> "$release/clients/macos-arm64/dsvpn"
 if systemctl restart "$service"; then exit 1; fi
+(cd /opt/fkgfw-dsvpn/release/clients && sha256sum --quiet -c SHA256SUMS)
+[[ $(sha256sum < /opt/fkgfw-dsvpn/release/clients/SHA256SUMS | cut -d' ' -f1) = "$bundle" ]]
 invoke install.sh 1 dsvpn
 if grep -q 'trycloudflare.com/' "$work/log" || systemctl is-active --quiet "$download"; then exit 1; fi
 invoke install.sh $'3\nyes' dsvpn
@@ -195,4 +225,4 @@ invoke reality_hy2_ws.sh $'12\n\n\n'
 grep -Fq ".trycloudflare.com/$bundle/" "$work/log"
 [[ $(sha256sum "$cfg/vpn.key") = "$key" ]]
 check_inodes "$release"
-echo 'PASS checkout-backed TCP/KCP, active connections survive checkout updates, restart switches server and downloads together, bad release rejected, uninstall and fresh install'
+echo 'PASS deployment UID, root-owned TCP/KCP binaries and downloads, git pull, restart sync, corrupt update rejection and uninstall'

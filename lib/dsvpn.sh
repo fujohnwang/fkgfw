@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 source "$SCRIPT_DIR/lib/installer.sh"
 
 cfg=/etc/fkgfw-dsvpn
+store=/opt/fkgfw-dsvpn
 runtime=/run/fkgfw-dsvpn
 units=/etc/systemd/system
 tunnel=fkgfw-dsvpn-tunnel
@@ -216,18 +217,23 @@ if [ -f "$units/fkgfw-dsvpn.service" ]; then
 fi
 work=$(mktemp -d)
 changed=0
-paths=("$cfg")
+paths=("$cfg" "$store")
 for name in "${services[@]}"; do paths+=("$units/$name.service"); done
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-if [ "$action" != remove ]; then
+if [ "$action" = remove ]; then
+    bash "$SCRIPT_DIR/lib/dsvpn-release.sh" check-store
+else
     if [ "$action" = edit ]; then
         artifacts=$(readlink "$cfg/artifacts")
+        deploy_uid=0
+        if [ -f "$cfg/deploy.uid" ]; then deploy_uid=$(cat "$cfg/deploy.uid"); fi
     else
         artifacts="$SCRIPT_DIR/artifacts/dsvpn"
+        deploy_uid=${SUDO_UID:-0}
     fi
-    arch=$(bash "$SCRIPT_DIR/lib/dsvpn-release.sh" verify "$artifacts")
+    arch=$(bash "$SCRIPT_DIR/lib/dsvpn-release.sh" verify "$artifacts" "$deploy_uid")
     check_prerequisites
     read_settings
 fi
@@ -239,22 +245,28 @@ done
 if [ "$action" = remove ]; then
     systemctl disable "${services[@]}"
     for name in "${services[@]}"; do rm -f "$units/$name.service"; done
-    rm -f -- "$cfg/artifacts" "$cfg/select-release" "$cfg/tunnel.yml"
+    rm -f -- "$cfg/artifacts" "$cfg/deploy.uid" "$cfg/select-release" "$cfg/tunnel.yml"
+    rm -rf -- "$store"
     systemctl daemon-reload
     echo "DSVPN 已卸载。密钥和配置保留在 $cfg。"
     exit 0
 fi
 install -d -m 700 "$cfg"
+if [[ ! -d "$store" ]]; then
+    install -d -m 700 "$store"
+    touch "$store/.managed-by-fkgfw"
+fi
 if [ "$action" = install ]; then
+    printf '%s\n' "$deploy_uid" > "$cfg/deploy.uid"
     ln -sfnT -- "$artifacts" "$cfg/artifacts"
-    install -m 700 "$SCRIPT_DIR/lib/dsvpn-release.sh" "$cfg/select-release"
     printf '{}\n' > "$cfg/tunnel.yml"
     chmod 644 "$cfg/tunnel.yml"
-    for name in "${services[@]}"; do
-        sed "s/@ARCH@/$arch/g" "$SCRIPT_DIR/services/$name.service" > "$work/$name.service"
-        install -m 644 "$work/$name.service" "$units/$name.service"
-    done
 fi
+install -m 700 "$SCRIPT_DIR/lib/dsvpn-release.sh" "$cfg/select-release"
+for name in "${services[@]}"; do
+    sed "s/@ARCH@/$arch/g" "$SCRIPT_DIR/services/$name.service" > "$work/$name.service"
+    install -m 644 "$work/$name.service" "$units/$name.service"
+done
 if [ ! -f "$cfg/vpn.key" ]; then head -c 32 /dev/urandom > "$cfg/vpn.key"; fi
 printf '%s\nVPN_PORT=%s\nDOWNLOAD_PORT=%s\nSERVER_HOST=%s\n' "$marker" "$vpn" "$download" "$host" > "$cfg/server.env"
 systemctl daemon-reload

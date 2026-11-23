@@ -21,4 +21,4 @@
 - DSVPN 2.1.0 的 VPN 端口同时占用 TCP 和 UDP（默认 1959），下载端口仍为 TCP（默认 1960）。已在 Debian arm64 验证 TCP 断连后自动切 KCP、四平台文件下载、旧版升级、旧 TCP 客户端互通和失败回滚。
 - DSVPN 下载源站改为仅监听 127.0.0.1，独立 Quick Tunnel 通过 HTTPS 提供已安装版本。菜单从当前 cloudflared 进程读取就绪状态和临时域名。两个 Linux 架构的 cloudflared 2026.11.2 以可执行文件随仓分发。
 - Debian arm64 已验证旧 HTTP 部署迁移、失败回滚、密钥保留、链接更新及 VPN 隧道收发。公网 HTTPS 经真实 Cloudflare 下载合成文件；四个平台的客户端与校验清单在本机下载源站逐一比对。
-- DSVPN 每次启动从固定的 latest 目录取得制品，在 checkout 的 .fkgfw-dsvpn-running 私有目录中保留运行中制品的硬链接，停止时清理。节点 git pull 可以更新同名文件，已建立的连接和配套下载继续使用同一组 inode。
+- DSVPN 初装记录执行 sudo 的部署 UID。每次启动由 ExecStartPre 将本地 checkout 的 latest 同步到 root 私有的 /opt/fkgfw-dsvpn，按白名单复制并验证 SHA-256，再同时切换服务和下载。校验失败时保留上次通过校验的文件。

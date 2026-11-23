@@ -94,11 +94,11 @@ VLESS TLS + Vision 和 AnyTLS 均使用普通 TLS、受信任证书和服务器�
 
 ## 部署 DSVPN 和客户端下载
 
-先把 fkgfw 克隆到服务器的长期目录。systemd 直接执行仓库中的制品，下载服务也从同一版本目录读取客户端。请用 root 管理该 checkout，服务运行期间保留其路径并允许服务创建运行时硬链接。服务器采用 x86_64 或 aarch64 Linux、systemd 和 TUN，需启用 IPv4 转发并支持 IPv6 接口配置。安装器检查转发状态；如需持久化，请在主机的 sysctl 配置中设置 `net.ipv4.ip_forward=1`。Linux 使用 iproute2 和 iptables。
+用部署账号把 fkgfw 克隆到服务器的长期目录。首次安装会记录执行 sudo 的账号 UID，systemd 此后允许该账号或 root 维护制品。该账号可以决定下次启动运行的 VPN 程序，请保留 checkout 路径，并限制其他账号的写权限。服务器采用 x86_64 或 aarch64 Linux、systemd 和 TUN，需启用 IPv4 转发并支持 IPv6 接口配置。安装器检查转发状态；如需持久化，请在主机的 sysctl 配置中设置 `net.ipv4.ip_forward=1`。Linux 使用 iproute2 和 iptables。
 
 ```bash
-sudo git clone https://github.com/fujohnwang/fkgfw.git /srv/fkgfw
-cd /srv/fkgfw
+git clone https://github.com/fujohnwang/fkgfw.git ~/fkgfw
+cd ~/fkgfw
 sudo bash install.sh dsvpn
 # 有固定域名或 NAT 公网地址时，可以指定交互默认值
 sudo env SERVER_ADDRESS=vpn.example.org bash reality_hy2_ws.sh dsvpn
@@ -120,7 +120,7 @@ chmod +x ./dsvpn
 sudo ./dsvpn client /etc/dsvpn/vpn.key vpn.example.org 1959
 ```
 
-节点执行 `git pull` 后，当前 VPN 连接和客户端下载继续使用运行中的版本。要启用拉取的新制品，执行 `sudo systemctl restart fkgfw-dsvpn`。每次服务启动（包括服务器重启）都会校验并使用仓库 `artifacts/dsvpn/latest/` 中的制品。下载服务随 VPN 一起切换，重启后可在菜单 `1` 获取与该次启动匹配的四个 HTTPS 链接和 SHA-256。
+节点执行 `git pull` 后，当前 VPN 连接和客户端下载继续使用运行中的版本。执行 `sudo systemctl restart fkgfw-dsvpn` 即可启用新版。每次启动（包括开机）都会把本地 `artifacts/dsvpn/latest/` 同步到 root 管理的 `/opt/fkgfw-dsvpn`，校验 SHA-256 后切换 VPN 和客户端下载。重启后可在菜单 `1` 获取当前四个 HTTPS 链接和 SHA-256。
 
 管理菜单的 `1` 查看连接和下载信息，`2` 修改地址或端口，`3` 卸载 VPN、下载源站及下载隧道。卸载保留仓库、密钥与端口配置。可用 `journalctl -u fkgfw-dsvpn -u fkgfw-dsvpn-download -u fkgfw-dsvpn-tunnel` 查看日志。下载服务以独立的非特权账户读取公开目录，密钥位于私有配置目录。
 
