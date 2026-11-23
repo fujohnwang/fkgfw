@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run only in a fresh disposable Linux VM with systemd, TUN and IPv4 forwarding.
+# Run only in a fresh disposable Linux VM with systemd and TUN.
 set -euo pipefail
 [[ ${FKGFW_DSVPN_TEST:-} = 1 && $EUID = 0 && $(ps -p 1 -o comm=) = systemd ]] || exit 2
 [[ ! -e /etc/fkgfw-dsvpn && ! -e /opt/fkgfw-dsvpn && ! -e /etc/sing-box ]] || exit 2
@@ -63,7 +63,7 @@ ExecStart=/usr/bin/env /run/fkgfw-dsvpn-tunnel/test-httpd $metrics_dir --addr 12
 EOF
 fi
 invoke() {
-    printf '%s\n' "$2" | bash "$repo/$1" "${@:3}" > "$work/log" 2>&1 || { cat "$work/log"; return 1; }
+    printf '%s\n' "$2" | sh "$repo/$1" "${@:3}" > "$work/log" 2>&1 || { cat "$work/log"; return 1; }
 }
 license="$release/clients/LICENSE"
 original_mode=$(stat -c %a "$license")
@@ -79,7 +79,9 @@ if [[ "$deploy_uid" != 0 ]]; then
     chown root:root "$license"
     chmod 644 "$license"
 fi
+sysctl -qw net.ipv4.ip_forward=0
 invoke install.sh $'12\n\n\n'
+[[ $(< /proc/sys/net/ipv4/ip_forward) = 1 ]]
 [[ $(cat "$cfg/deploy.uid") = "$deploy_uid" && $(stat -c '%u:%a' "$cfg/deploy.uid") = 0:600 ]]
 [[ $(stat -c '%u:%a' /opt/fkgfw-dsvpn) = 0:700 && ! -e "$repo/artifacts/dsvpn/.fkgfw-dsvpn-running" ]]
 cmp "$license" /run/fkgfw-dsvpn/release/clients/LICENSE
@@ -171,7 +173,9 @@ for transport in TCP KCP/UDP; do
         [[ $(systemctl show "$service" -p MainPID --value) = "$old_pid" ]]
         ip netns exec "$ns" ping -c 1 -W 2 192.168.192.254
         ip netns exec "$ns" iptables -A OUTPUT -p tcp --syn -d 198.18.75.1 --dport 1959 -j DROP
+        sysctl -qw net.ipv4.ip_forward=0
         systemctl restart "$service"
+        [[ $(< /proc/sys/net/ipv4/ip_forward) = 1 ]]
         bundle=$next_bundle
     fi
     for ((i=0;i<100;i++)); do grep -Fq "Connected ($transport)" "$work/client.log" && break; sleep .2; done

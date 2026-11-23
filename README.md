@@ -38,7 +38,7 @@ sudo bash install.sh
 - `sudo bash install.sh`：新安装默认选项 3。
 - `sudo bash reality_hy2_ws.sh`：新安装默认选项 5。
 
-必须保留整个仓库的 `lib/` 目录，不能只复制入口脚本。
+使用 `sudo sh install.sh` 或 `sudo sh reality_hy2_ws.sh` 时，入口会自动切换到 Bash。必须保留整个仓库的 `lib/` 目录，不能只复制入口脚本。
 
 已有旧部署、准备切换到新版时，先运行下面的 `migration.sh` 完成一次性清理，再运行安装入口。
 
@@ -94,7 +94,7 @@ VLESS TLS + Vision 和 AnyTLS 均使用普通 TLS、受信任证书和服务器�
 
 ## 部署 DSVPN 和客户端下载
 
-用部署账号把 fkgfw 克隆到服务器的长期目录。首次安装会记录执行 sudo 的账号 UID，systemd 此后允许该账号或 root 维护制品。该账号可以决定下次启动运行的 VPN 程序，请保留 checkout 路径，并限制其他账号的写权限。服务器采用 x86_64 或 aarch64 Linux、systemd 和 TUN，需启用 IPv4 转发并支持 IPv6 接口配置。安装器检查转发状态；如需持久化，请在主机的 sysctl 配置中设置 `net.ipv4.ip_forward=1`。Linux 使用 iproute2 和 iptables。
+用部署账号把 fkgfw 克隆到服务器的长期目录。首次安装会记录执行 sudo 的账号 UID，systemd 此后允许该账号或 root 维护制品。该账号可以决定下次启动运行的 VPN 程序，请保留 checkout 路径，并限制其他账号的写权限。服务器采用 x86_64 或 aarch64 Linux、systemd 和 TUN，需支持 IPv6 接口配置。安装器会自动开启 IPv4 转发（`net.ipv4.ip_forward=1`），DSVPN 服务每次启动时也会检查并按需开启。Linux 使用 iproute2 和 iptables。
 
 ```bash
 git clone https://github.com/fujohnwang/fkgfw.git ~/fkgfw
@@ -228,4 +228,4 @@ docker run --rm --init --network none -e FKGFW_CONTAINER_TEST=1 \
   --workdir /repo fkgfw-smoke:local python3 tests/linux-cleanup.py
 ```
 
-DSVPN 回归使用带 systemd、TUN 和 IPv4 转发的全新可丢弃 Linux 虚拟机，需事先安装 git 和 iputils-ping。运行 `sudo env FKGFW_DSVPN_TEST=1 bash tests/linux-dsvpn.sh`，验证四个平台的源站文件、HTTPS 链接生成、隧道断线提示、VPN 流量、拉取制品时保留连接、重启后服务端与下载同步切版、损坏制品拒绝启动、卸载重装及安装失败回滚。默认使用本机模拟的连接器状态；要实际经公网 HTTPS 下载四份制品，可同时设置 `FKGFW_DSVPN_LIVE_TUNNEL=1`，测试期间 Cloudflare 会公开该虚拟机上的客户端文件。
+DSVPN 回归使用带 systemd 和 TUN 的全新可丢弃 Linux 虚拟机，需事先安装 git 和 iputils-ping。运行 `sudo env FKGFW_DSVPN_TEST=1 bash tests/linux-dsvpn.sh`，验证四个平台的源站文件、HTTPS 链接生成、隧道断线提示、VPN 流量、拉取制品时保留连接、重启后服务端与下载同步切版、损坏制品拒绝启动、卸载重装及安装失败回滚。默认使用本机模拟的连接器状态；要实际经公网 HTTPS 下载四份制品，可同时设置 `FKGFW_DSVPN_LIVE_TUNNEL=1`，测试期间 Cloudflare 会公开该虚拟机上的客户端文件。

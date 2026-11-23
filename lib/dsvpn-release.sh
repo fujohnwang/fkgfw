@@ -4,6 +4,15 @@ set -euo pipefail
 umask 077
 fail() { echo "DSVPN: $*" >&2; exit 1; }
 
+enable_ipv4_forwarding() {
+    local flag=/proc/sys/net/ipv4/ip_forward
+    [[ $(< "$flag") = 1 ]] && return 0
+    if ! printf '1\n' > "$flag" || [[ $(< "$flag") != 1 ]]; then
+        fail '无法启用 IPv4 转发。请在宿主机执行 sudo sysctl -w net.ipv4.ip_forward=1 后重试。'
+    fi
+    echo 'DSVPN 已启用 IPv4 转发（net.ipv4.ip_forward=1）。'
+}
+
 # Allow a group-writable checkout when the deployer's private primary group
 # contains no other accounts. Named ACLs are checked separately on each path.
 private_deploy_group() {
@@ -51,6 +60,7 @@ if [[ -e "$store" || -L "$store" ]]; then
 fi
 case "$1" in
     check-store) exit 0 ;;
+    enable-forwarding) enable_ipv4_forwarding; exit 0 ;;
     verify) artifacts=$2; deploy_uid=${3:-0} ;;
     activate)
         artifacts=$(readlink "$cfg/artifacts")
@@ -113,6 +123,7 @@ fi
     fail '客户端制品 SHA-256 校验失败。'
 
 if [[ "$1" = verify ]]; then printf '%s\n' "$arch"; exit 0; fi
+enable_ipv4_forwarding
 digest=$(sha256sum < "$stage/clients/SHA256SUMS")
 # Switch the root-private release link atomically. Alternating slots keep the
 # previous set available until every file in its replacement passes verification.

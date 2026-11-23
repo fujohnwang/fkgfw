@@ -137,7 +137,6 @@ read_settings() {
 
 check_prerequisites() {
     [ -c /dev/net/tun ] || fail '需要 Linux TUN 设备 /dev/net/tun。'
-    [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ] || fail '请先以管理员身份开启 net.ipv4.ip_forward=1，再运行安装。'
     if ! command -v iptables >/dev/null; then
         if command -v apt-get >/dev/null; then apt-get update && apt-get install -y iptables
         elif command -v dnf >/dev/null; then dnf install -y iptables
@@ -236,6 +235,7 @@ else
     arch=$(bash "$SCRIPT_DIR/lib/dsvpn-release.sh" verify "$artifacts" "$deploy_uid")
     check_prerequisites
     read_settings
+    bash "$SCRIPT_DIR/lib/dsvpn-release.sh" enable-forwarding
 fi
 snapshot
 changed=1
