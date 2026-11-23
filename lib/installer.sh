@@ -131,7 +131,8 @@ configure_protocols() (
         echo '错误: Caddy 本地反代不能占用 ACME 所需的 TCP 80。' >&2
         exit 1
     fi
-    validate_listeners "$stage/config.json" "$caddy_port"
+    dsvpn_ports=$(installed_dsvpn_ports)
+    validate_listeners "$stage/config.json" "$caddy_port" "$dsvpn_ports"
     if [ "$new_ws" -eq 1 ]; then
         for component in caddy cloudflared; do
             if [ ! -x "/usr/local/bin/$component" ] || [ ! -f /etc/sing-box/config.json ]; then
@@ -284,6 +285,7 @@ installer_main() {
     mkdir -p /run/lock || return 1
     exec 9>/run/lock/fkgfw.lock
     flock -n 9 || { echo '另一个安装/管理进程正在运行。' >&2; return 1; }
+    if [ "${2:-}" = dsvpn ]; then bash "$SCRIPT_DIR/lib/dsvpn.sh"; return; fi
     if [ -f /root/sbconfig_server.json ] && [ ! -f /etc/sing-box/config.json ]; then
         create_singbox_user || return 1
         migrate_legacy_install
@@ -291,6 +293,7 @@ installer_main() {
     fi
     if [ ! -f /etc/sing-box/config.json ]; then
         selected=$(choose_protocols "$preset") || return 1
+        if [ "$selected" = dsvpn ]; then bash "$SCRIPT_DIR/lib/dsvpn.sh"; return; fi
         configure_protocols "$selected"
         [ "$?" -eq 0 ] || return 1
         show_configuration cached
@@ -305,13 +308,15 @@ installer_main() {
     echo '1. 调整协议组合（保留仍选中协议的配置）'
     echo '2. 修改已安装协议的端口 / SNI / 证书域名 / WS 路径'
     echo '3. 显示客户端配置与分享链接'
-    echo '4. 卸载'
+    echo '4. 卸载 sing-box 协议组合'
     echo '5. 更新所选协议使用的服务端程序'
     if has_ws /etc/sing-box/config.json; then echo '6. 重启 Cloudflare Tunnel 并显示新链接'; fi
+    echo '7. 安装或管理 DSVPN 服务及客户端下载'
     read -r -p '选择操作: ' choice || return 1
     case "$choice" in
         1)
             selected=$(choose_protocols "$preset" "$(managed_tags /etc/sing-box/config.json)") || return 1
+            if [ "$selected" = dsvpn ]; then bash "$SCRIPT_DIR/lib/dsvpn.sh"; return; fi
             configure_protocols "$selected"
             [ "$?" -eq 0 ] || return 1
             show_configuration cached
@@ -329,6 +334,7 @@ installer_main() {
         3) show_configuration ;;
         4) uninstall_managed ;;
         5) update_selected_components ;;
+        7) bash "$SCRIPT_DIR/lib/dsvpn.sh" ;;
         6)
             has_ws /etc/sing-box/config.json || { echo '未安装 WebSocket 协议，无需启动 Tunnel。' >&2; return 1; }
             systemctl restart cloudflared || return 1

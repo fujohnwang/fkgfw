@@ -1,6 +1,8 @@
-# sing-box 协议组合安装脚本
+# fkgfw 服务端部署
 
 支持 **Reality、Hysteria2、VMess WS、VLESS WS、VLESS TLS + Vision、AnyTLS、Shadowsocks 2022（AES-256-GCM）** 七种协议的任意非空组合，共 127 种。WebSocket 通过 Caddy + Cloudflare Quick Tunnel 接入。
+
+也可单独部署 **DSVPN v2**，或将它追加到已有服务器。DSVPN 服务和配套客户端下载由独立的 systemd 单元运行。
 
 ## 安装
 
@@ -27,6 +29,7 @@ sudo bash install.sh
 | 9 | VLESS TLS + Vision + AnyTLS |
 | 10 | 全部七种（含 Shadowsocks） |
 | 11 | Shadowsocks 2022（AES-256-GCM）：新部署单独安装，已有部署追加 |
+| 12 | 安装或管理 DSVPN 及其客户端下载 |
 
 自定义模式中，`1=Reality`、`2=Hysteria2`、`3=VMess WS`、`4=VLESS WS`、`5=VLESS TLS + Vision`、`6=AnyTLS`、`7=Shadowsocks`。例如输入 `2,5,6,7` 安装 Hysteria2 + VLESS TLS + Vision + AnyTLS + Shadowsocks。原有默认组合和菜单 1–6 的含义保留。
 
@@ -79,6 +82,7 @@ VLESS TLS + Vision 和 AnyTLS 均使用普通 TLS、受信任证书和服务器�
 | 4 | 卸载 |
 | 5 | 更新当前组合所需的服务端程序 |
 | 6 | 重启 Quick Tunnel，仅在安装了 WS 协议时显示 |
+| 7 | 安装或管理 DSVPN；移除 DSVPN 请使用其独立菜单 |
 
 调整组合时，输入**最终希望保留的所有协议**：仍选中的协议保留端口、用户、密钥和其他 inbound 参数，只询问新增协议的参数。选项 **11** 专门用于追加 Shadowsocks，不移除已有协议。移除后重新添加的协议会生成新的认证信息。
 
@@ -87,6 +91,30 @@ VLESS TLS + Vision 和 AnyTLS 均使用普通 TLS、受信任证书和服务器�
 组合变更先检查候选配置，再备份到 `/var/backups/fkgfw/protocols.*` 后应用。启动或客户端配置导出失败会恢复原文件和服务的 active/enabled 状态。备份包含密钥，请妥善保管。自定义 inbound 和无关设置保留；若自定义 logical rule 引用了被移除的协议，会要求先处理规则，避免改变其含义。
 
 同一传输层的监听端口不能重复；TCP 与 UDP 可以使用相同端口。WS 路径必须不同，且不能与 Caddy 本地监听端口冲突。
+
+## 部署 DSVPN 和客户端下载
+
+保留仓库中的 `artifacts/dsvpn/`、`services/`、`lib/` 和安装入口。服务器采用 x86_64 或 aarch64 Linux、systemd 和 TUN，需启用 IPv4 转发并支持 IPv6 接口配置。安装器检查转发状态；如需持久化，请在主机的 sysctl 配置中设置 `net.ipv4.ip_forward=1`。Linux 使用 iproute2 和 iptables。
+
+```bash
+sudo bash install.sh dsvpn
+# 有固定域名或 NAT 公网地址时，可以指定交互默认值
+sudo env SERVER_ADDRESS=vpn.example.org bash reality_hy2_ws.sh dsvpn
+```
+
+新装时也可在两个入口选 `12`，已有 sing-box 管理菜单选 `7`。确认客户端能访问的公网域名/IP 和两个 TCP 端口，默认 VPN 为 `1959`、HTTP 下载为 `1960`。在安全组及主机入站防火墙放行这两个端口。DSVPN 自行管理隧道转发和 NAT。DSVPN 可与 sing-box 独立安装、更新及卸载。
+
+部署成功后显示 Linux amd64、Linux arm64、macOS Intel、macOS Apple Silicon 四个下载链接及 SHA-256。下载由该 VPS 提供。URL 中的版本取自整套客户端的校验清单，升级替换公开目录；旧 URL 不会返回其他版本的文件。重新运行安装入口，在 DSVPN 管理菜单选 `1` 可查看当前部署的链接，即使仓库中的制品已替换也会显示已安装版本。
+
+客户端选择与 `uname -s`、`uname -m` 相符的文件。通过可信渠道取得安装终端打印的 SHA-256 并核对下载，再赋予执行权限。macOS 程序为 ad-hoc 签名，未经 Apple 公证。通过 SSH/SFTP 等保密渠道取得服务器上的 `/etc/fkgfw-dsvpn/vpn.key`，在客户端将它安装成 root 所有、模式 600 的 32 字节文件。
+
+```bash
+shasum -a 256 ./dsvpn   # Linux 也可用 sha256sum
+chmod +x ./dsvpn
+sudo ./dsvpn client /etc/dsvpn/vpn.key vpn.example.org 1959
+```
+
+DSVPN 管理菜单的 `2` 修改地址或端口，`3` 用仓库内整套制品升级，`4` 卸载 VPN 与下载服务。改端口、升级、卸载后重装均保留密钥。两个服务的日志可用 `journalctl -u fkgfw-dsvpn -u fkgfw-dsvpn-download` 查看。下载服务以独立的非特权账户读取公开目录，密钥位于私有配置目录。
 
 ## 稳定版与升级
 
@@ -191,3 +219,5 @@ docker run --rm --init --network none -e FKGFW_CONTAINER_TEST=1 \
   --mount type=bind,src="$PWD",dst=/repo,readonly \
   --workdir /repo fkgfw-smoke:local python3 tests/linux-cleanup.py
 ```
+
+DSVPN 回归使用带 systemd、TUN 和 IPv4 转发的全新可丢弃 Linux 虚拟机，需事先安装 iputils-ping。测试会安装和移除服务、创建测试网络命名空间。进入仓库后运行 `sudo env FKGFW_DSVPN_TEST=1 bash tests/linux-dsvpn.sh`，覆盖四个平台的实际下载、隧道流量、改端口、升级、回滚和卸载重装。

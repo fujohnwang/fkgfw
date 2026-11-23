@@ -43,6 +43,7 @@ choose_protocols() {
     else
         echo '11. 增加 Shadowsocks 2022（AES-256-GCM，保留已安装协议）' >&2
     fi
+    echo '12. 安装或管理 DSVPN（可单独运行或与现有协议共存）' >&2
     while true; do
         read -r -p "选择组合 [默认 $default]: " choice || return 1
         case "${choice:-$default}" in
@@ -61,7 +62,8 @@ choose_protocols() {
             9) normalize_selection '5 6'; return ;;
             10) normalize_selection '1 2 3 4 5 6 7'; return ;;
             11) jq -cen --argjson existing "$existing" '$existing | if index("ss-in") == null then . + ["ss-in"] else . end'; return ;;
-            *) echo '请输入 1–11。' >&2 ;;
+            12) echo dsvpn; return ;;
+            *) echo '请输入 1–12。' >&2 ;;
         esac
     done
 }
@@ -171,19 +173,32 @@ collect_inbound() (
     jq -f "$SCRIPT_DIR/lib/new-inbound.jq" <<< "$params"
 )
 
+installed_dsvpn_ports() {
+    if [ -f /etc/systemd/system/fkgfw-dsvpn.service ]; then
+        local vpn download
+        vpn=$(sed -n 's/^VPN_PORT=//p' /etc/fkgfw-dsvpn/server.env) || return 1
+        download=$(sed -n 's/^DOWNLOAD_PORT=//p' /etc/fkgfw-dsvpn/server.env) || return 1
+        [[ "$vpn" =~ ^[1-9][0-9]{0,4}$ && "$download" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
+        printf '[%s,%s]\n' "$vpn" "$download"
+    else
+        echo '[]'
+    fi
+}
+
 validate_listeners() {
-    local config="$1" caddy_port="$2"
-    jq -e --argjson caddy_port "$caddy_port" '
-      [.inbounds[] | select(.listen_port != null)
+    local config="$1" caddy_port="$2" dsvpn_ports="${3:-[]}"
+    jq -e --argjson caddy_port "$caddy_port" --argjson dsvpn "$dsvpn_ports" '
+      ([.inbounds[] | select(.listen_port != null)
         | . as $inbound
         | (if .type == "hysteria2" then ["udp"]
            elif .type == "shadowsocks" then
              if (.network // "") == "" or .network == [] then ["tcp", "udp"]
              elif (.network | type) == "array" then .network else [.network] end
            else ["tcp"] end)[] as $network
-        | {port: $inbound.listen_port, network: $network}] as $ports
+        | {port: $inbound.listen_port, network: $network}] + [$dsvpn[] | {port: ., network: "tcp"}]) as $ports
       | (all($ports[]; .port >= 1 and .port <= 65535))
         and (($ports | unique | length) == ($ports | length))
+        and (if any(.inbounds[]; .tls.certificate_provider? == "fkgfw-acme") then ($dsvpn | index(80)) == null else true end)
         and (if any(.inbounds[]; .tag == "vmess-in" or .tag == "vless-ws-in") then
           all($ports[]; .network != "tcp" or .port != $caddy_port)
           and ([.inbounds[] | select(.tag == "vmess-in" or .tag == "vless-ws-in") | .transport.path] as $paths

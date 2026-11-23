@@ -1,0 +1,25 @@
+# Managed by fkgfw (DSVPN)
+[Unit]
+Description=fkgfw DSVPN server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/fkgfw-dsvpn/server.env
+ExecStart=/opt/fkgfw-dsvpn/server server /etc/fkgfw-dsvpn/vpn.key :: ${VPN_PORT}
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=true
+ProtectKernelTunables=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+RestrictAddressFamilies=AF_NETLINK AF_INET AF_INET6 AF_UNIX AF_PACKET
+
+[Install]
+WantedBy=multi-user.target
