@@ -112,17 +112,20 @@ VPS 上的独立 cloudflared 服务向 Cloudflare 建立出站连接。隧道就
 
 服务器需要 DNS、访问 Cloudflare 注册接口的出站 HTTPS，以及到 Tunnel 边缘的出站 7844（QUIC 使用 UDP，HTTP/2 使用 TCP）。如果安装时隧道尚未连通，VPN 可独立使用；连接器会重试，菜单 `1` 在隧道就绪后显示链接。Quick Tunnel 无可用性保证。[Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)
 
-客户端选择与 `uname -s`、`uname -m` 相符的文件。通过可信渠道取得安装终端打印的 SHA-256 并核对下载，再赋予执行权限。macOS 程序为 ad-hoc 签名，未经 Apple 公证。通过 SSH/SFTP 等保密渠道取得服务器上的 `/etc/fkgfw-dsvpn/vpn.key`，在客户端将它安装成 root 所有、模式 600 的 32 字节文件。
+**用 SCP 一次取回程序和密钥。** 在服务器运行 `sudo sh install.sh dsvpn`，选 `4` 并选择客户端平台。安装器把本次运行版本的 `dsvpn` 和同一份 `vpn.key` 导出到 SSH 账号主目录里的私有目录。将终端打印的三行命令复制到客户端，即可取回整个目录、进入目录并连接。SCP 保留可执行权限和密钥的 `600` 权限。取回后可按提示删除服务器上的导出副本。从 2.1.0 更新的节点，请先执行 `sudo systemctl restart fkgfw-dsvpn`，使导出的客户端支持普通登录账号持有的密钥。
+
+**通过浏览器下载程序。** 选择与客户端 `uname -s`、`uname -m` 相符的文件，核对安装终端打印的 SHA-256。请获准访问服务器的管理员通过私有渠道交付密钥，将其保存为程序旁的 `vpn.key`，再在该目录执行以下命令。macOS 程序使用 ad-hoc 签名，未经 Apple 公证。
 
 ```bash
 shasum -a 256 ./dsvpn   # Linux 也可用 sha256sum
 chmod +x ./dsvpn
-sudo ./dsvpn client /etc/dsvpn/vpn.key vpn.example.org 1959
+chmod 600 ./vpn.key
+sudo ./dsvpn client ./vpn.key vpn.example.org 1959
 ```
 
 节点执行 `git pull` 后，当前 VPN 连接和客户端下载继续使用运行中的版本。执行 `sudo systemctl restart fkgfw-dsvpn` 即可启用新版。每次启动（包括开机）都会把本地 `artifacts/dsvpn/latest/` 同步到 root 管理的 `/opt/fkgfw-dsvpn`，校验 SHA-256 后切换 VPN 和客户端下载。重启后可在菜单 `1` 获取当前四个 HTTPS 链接和 SHA-256。
 
-管理菜单的 `1` 查看连接和下载信息，`2` 修改地址或端口，`3` 卸载 VPN、下载源站及下载隧道。卸载保留仓库、密钥与端口配置。可用 `journalctl -u fkgfw-dsvpn -u fkgfw-dsvpn-download -u fkgfw-dsvpn-tunnel` 查看日志。下载服务以独立的非特权账户读取公开目录，密钥位于私有配置目录。
+管理菜单的 `1` 查看连接和下载信息，`2` 修改地址或端口，`3` 卸载 VPN、下载源站及下载隧道，`4` 私有导出客户端和密钥。卸载保留仓库、密钥与端口配置。可用 `journalctl -u fkgfw-dsvpn -u fkgfw-dsvpn-download -u fkgfw-dsvpn-tunnel` 查看日志。下载服务以独立的非特权账户读取公开目录。服务器原始密钥位于 `/etc/fkgfw-dsvpn/vpn.key`，由 root 持有。
 
 ## 稳定版与升级
 

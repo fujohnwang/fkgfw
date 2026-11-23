@@ -1,5 +1,6 @@
 #!/bin/bash
 # Run only in a fresh disposable Linux VM with systemd and TUN.
+# Set FKGFW_DSVPN_TEST_SSH_CONFIG for passwordless SCP to the test login on 127.0.0.1.
 set -euo pipefail
 [[ ${FKGFW_DSVPN_TEST:-} = 1 && $EUID = 0 && $(ps -p 1 -o comm=) = systemd ]] || exit 2
 [[ ! -e /etc/fkgfw-dsvpn && ! -e /opt/fkgfw-dsvpn && ! -e /etc/sing-box ]] || exit 2
@@ -14,6 +15,7 @@ live=${FKGFW_DSVPN_LIVE_TUNNEL:-0}
 metrics_dir=''
 ns=fkgfw-dsvpn-test
 peer_pid=''
+export_dir=''
 operator=()
 deploy_uid=${SUDO_UID:-0}
 if [[ "$deploy_uid" != 0 ]]; then
@@ -21,6 +23,7 @@ if [[ "$deploy_uid" != 0 ]]; then
     chmod 711 "$work"
 fi
 finish() {
+    if [[ -n "$export_dir" ]]; then "${operator[@]}" rm -rf -- "$export_dir"; fi
     if [[ -n $peer_pid ]]; then kill "$peer_pid" 2>/dev/null || true; wait "$peer_pid" || true; fi
     ip netns del "$ns" 2>/dev/null || true
     ip link del dsvpn-e2e-host 2>/dev/null || true
@@ -96,11 +99,20 @@ for platform in linux-amd64 linux-arm64 macos-amd64 macos-arm64; do
     url=$(awk -v platform="$platform" '$1 == platform { print $2 }' "$work/log")
     [[ "$url" =~ ^https://[a-z0-9-]+\.trycloudflare\.com/ && "$url" == */"$bundle/$platform/dsvpn" ]]
     if [ "$live" = 1 ]; then
-        curl --retry 5 --retry-all-errors --max-time 20 -fsS "$url" -o "$work/$platform"
+        curl_args=(--retry 5 --retry-all-errors --max-time 20)
     else
-        curl --noproxy '*' -fsS "http://127.0.0.1:1960/$bundle/$platform/dsvpn" -o "$work/$platform"
+        url="http://127.0.0.1:1960/$bundle/$platform/dsvpn"
+        curl_args=(--noproxy '*')
     fi
-    cmp "$work/$platform" "$release/clients/$platform/dsvpn"
+    mkdir "$work/download-$platform"
+    (cd "$work/download-$platform" && curl "${curl_args[@]}" -fsS -D headers -OJ "$url")
+    tr -d '\r' < "$work/download-$platform/headers" | grep -Fxi 'Content-Disposition: attachment; filename="dsvpn"' >/dev/null
+    cmp "$work/download-$platform/dsvpn" "$release/clients/$platform/dsvpn"
+done
+mkdir "$work/download-metadata"
+for file in SHA256SUMS LICENSE KCP-LICENSE Monocypher-LICENCE.md; do
+    (cd "$work/download-metadata" && curl --noproxy '*' -fsS -OJ "http://127.0.0.1:1960/$bundle/$file")
+    cmp "$work/download-metadata/$file" "$release/clients/$file"
 done
 [[ $(ss -H -ltn 'sport = :1960' | awk '{print $4}') = 127.0.0.1:1960 ]]
 if [ "$live" != 1 ]; then
@@ -135,7 +147,42 @@ check_inodes() {
     [[ $(stat -Lc '%d:%i' "/proc/$pid/root/run/fkgfw-dsvpn-tunnel/cloudflared") = "$(stat -Lc '%d:%i' "$pinned/$arch/cloudflared")" ]]
 }
 check_inodes "$release"
-chmod 755 "$work/$arch"
+export_and_check() {
+    local expected=$1 platform=$2 number login directory source home_dir
+    case "$platform" in macos-arm64) number=1 ;; macos-amd64) number=2 ;; linux-amd64) number=3 ;; linux-arm64) number=4 ;; esac
+    login=$(id -nu "$deploy_uid")
+    home_dir=$(getent passwd "$login" | cut -d: -f6)
+    if [[ "$platform" = macos-amd64 ]]; then
+        (unset SUDO_UID SUDO_USER; invoke install.sh "$(printf '4\n%s\n%s\n' "$number" "$login")" dsvpn)
+    else
+        invoke install.sh "$(printf '4\n%s\n%s\n' "$number" "$login")" dsvpn
+    fi
+    directory=$(sed -n 's/^  cd \(dsvpn-[[:alnum:].-]*\)$/\1/p' "$work/log")
+    [[ "$directory" = "dsvpn-$platform."???????? ]]
+    source="$login@127.0.0.1:$directory"
+    grep -Fxq "  scp -pr '$source' ." "$work/log"
+    grep -Fxq '  sudo ./dsvpn client ./vpn.key 127.0.0.1 1959' "$work/log"
+    export_dir="$home_dir/$directory"
+    [[ $(stat -c '%u:%a' "$export_dir") = "$deploy_uid:700" ]]
+    [[ $(stat -c '%u:%a:%s' "$export_dir/vpn.key") = "$deploy_uid:600:32" ]]
+    cmp "$expected/clients/$platform/dsvpn" "$export_dir/dsvpn"
+    cmp "$cfg/vpn.key" "$export_dir/vpn.key"
+    [[ $(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:1960/$bundle/$platform/vpn.key") = 404 ]]
+    if [[ "$platform" = "$arch" && ! -d "$work/received" ]]; then
+        install -d -m 700 -o "$deploy_uid" "$work/received"
+        if [[ -n ${FKGFW_DSVPN_TEST_SSH_CONFIG:-} ]]; then
+            "${operator[@]}" scp -F "$FKGFW_DSVPN_TEST_SSH_CONFIG" -pr "$source" "$work/received/"
+        else
+            "${operator[@]}" cp -pR "$export_dir" "$work/received/"
+        fi
+        client_dir="$work/received/$directory"
+        [[ -x "$client_dir/dsvpn" && $(stat -c '%u:%a' "$client_dir/vpn.key") = "$deploy_uid:600" ]]
+        cmp "$client_dir/vpn.key" "$cfg/vpn.key"
+    fi
+    "${operator[@]}" rm -r -- "$export_dir"
+    export_dir=''
+}
+for platform in macos-arm64 macos-amd64 linux-amd64 linux-arm64; do export_and_check "$release" "$platform"; done
 ip netns add "$ns"
 ip link add dsvpn-e2e-host type veth peer name dsvpn-e2e-peer
 ip link set dsvpn-e2e-peer netns "$ns"
@@ -147,7 +194,7 @@ ip -n "$ns" link set lo up
 ip -n "$ns" route add default via 198.18.75.1
 ip -n "$ns" rule show > "$work/before4"
 ip -n "$ns" -6 rule show > "$work/before6"
-ip netns exec "$ns" "$work/$arch" client "$cfg/vpn.key" 198.18.75.1 1959 > "$work/client.log" 2>&1 &
+(cd "$client_dir" && exec ip netns exec "$ns" ./dsvpn client ./vpn.key 198.18.75.1 1959) > "$work/client.log" 2>&1 &
 peer_pid=$!
 for transport in TCP KCP/UDP; do
     if [ "$transport" = KCP/UDP ]; then
@@ -167,6 +214,7 @@ for transport in TCP KCP/UDP; do
         [[ "$live" = 1 || "$old_bundle" != "$next_bundle" ]]
         systemctl restart "$download" "$tunnel"
         check_inodes "$old"
+        export_and_check "$old" "$arch"
         invoke install.sh 1 dsvpn
         if [[ "$live" != 1 ]]; then grep -Fq ".trycloudflare.com/$bundle/" "$work/log"; fi
         curl -fsS --noproxy '*' "http://127.0.0.1:1960/$bundle/$arch/dsvpn" | cmp - "$old/clients/$arch/dsvpn"
@@ -229,4 +277,4 @@ invoke reality_hy2_ws.sh $'12\n\n\n'
 grep -Fq ".trycloudflare.com/$bundle/" "$work/log"
 [[ $(sha256sum "$cfg/vpn.key") = "$key" ]]
 check_inodes "$release"
-echo 'PASS deployment UID, root-owned TCP/KCP binaries and downloads, git pull, restart sync, corrupt update rejection and uninstall'
+echo 'PASS private client/key export, TCP/KCP, public downloads, git pull, restart sync, corrupt update rejection and uninstall'

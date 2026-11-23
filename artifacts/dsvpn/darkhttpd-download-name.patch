@@ -1,0 +1,52 @@
+--- a/darkhttpd.c
++++ b/darkhttpd.c
+@@ -2190,4 +2190,5 @@
+     char date[DATE_LEN], lastmod[DATE_LEN];
+     const char *mimetype = NULL;
++    const char *disposition = "";
+     const char *forward_to = NULL;
+     struct stat filestat;
+@@ -2276,4 +2277,7 @@
+     else {
+         /* points to a file */
++        const char *last_slash = strrchr(decoded_url, '/');
++        if (last_slash != NULL && strcmp(last_slash, "/dsvpn") == 0)
++            disposition = "Content-Disposition: attachment; filename=\"dsvpn\"\r\n";
+         xasprintf(&target, "%s%s", wwwroot, decoded_url);
+         mimetype = url_content_type(decoded_url);
+@@ -2338,7 +2342,8 @@
+          "%s" /* keep-alive */
+          "%s" /* custom headers */
++         "%s" /* attachment filename */
+          "\r\n",
+          rfc1123_date(date, now), server_hdr, keep_alive(conn),
+-         custom_hdrs);
++         custom_hdrs, disposition);
+         conn->reply_length = 0;
+         conn->reply_type = REPLY_GENERATED;
+@@ -2401,4 +2406,5 @@
+             "%s" /* keep-alive */
+             "%s" /* custom headers */
++            "%s" /* attachment filename */
+             "Content-Length: %llu\r\n"
+             "Content-Range: bytes %llu-%llu/%llu\r\n"
+@@ -2408,5 +2414,5 @@
+             ,
+             rfc1123_date(date, now), server_hdr, keep_alive(conn),
+-            custom_hdrs,
++            custom_hdrs, disposition,
+             llu(conn->reply_length), llu(from), llu(to),
+             llu(filestat.st_size), mimetype, lastmod
+@@ -2427,4 +2433,5 @@
+             "%s" /* keep-alive */
+             "%s" /* custom headers */
++            "%s" /* attachment filename */
+             "Content-Length: %llu\r\n"
+             "Content-Type: %s\r\n"
+@@ -2433,5 +2440,5 @@
+             ,
+             rfc1123_date(date, now), server_hdr, keep_alive(conn),
+-            custom_hdrs, llu(conn->reply_length), mimetype, lastmod
++            custom_hdrs, disposition, llu(conn->reply_length), mimetype, lastmod
+         );
+         conn->http_code = 200;

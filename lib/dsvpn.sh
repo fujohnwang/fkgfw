@@ -86,13 +86,55 @@ show_clients() {
         done < "$manifest"
     fi
     echo
-    echo '连接前还需要 vpn.key。客户端和服务端必须使用同一份密钥才能完成认证。'
-    echo "管理员请从服务器取出 $cfg/vpn.key，通过 SFTP 等保密渠道单独交给获准连接的用户。"
-    echo '这份密钥可用于冒充任一端，请勿放入公开下载目录。'
-    echo '客户端收到 vpn.key 后，在该文件所在目录执行：'
-    echo '  sudo install -d -m 700 /etc/dsvpn'
-    echo '  sudo install -o root -m 600 ./vpn.key /etc/dsvpn/vpn.key'
-    printf '客户端启动命令：sudo ./dsvpn client /etc/dsvpn/vpn.key %s %s\n' "$host" "$port"
+    echo '在 DSVPN 菜单选 4，按客户端平台导出 dsvpn 和 vpn.key，再用打印的 SCP 命令一起取回。'
+    echo '浏览器下载只包含程序。单独收到密钥时，将 vpn.key 放在程序旁，执行 chmod 600 ./vpn.key 和 chmod +x ./dsvpn。'
+    printf '进入这两个文件所在目录后运行：sudo ./dsvpn client ./vpn.key %s %s\n' "$host" "$port"
+}
+
+export_client() {
+    local platform choice account uid gid home record dir host port
+    systemctl is-active --quiet fkgfw-dsvpn || fail '请先启动 DSVPN，再导出与服务匹配的客户端。'
+    echo '选择客户端平台：1. macOS Apple 芯片  2. macOS Intel  3. Linux x86_64  4. Linux ARM64'
+    read -r -p '平台编号: ' choice
+    case "$choice" in
+        1) platform=macos-arm64 ;; 2) platform=macos-amd64 ;;
+        3) platform=linux-amd64 ;; 4) platform=linux-arm64 ;;
+        *) fail '无效的客户端平台。' ;;
+    esac
+    uid=${SUDO_UID:-0}
+    if [[ "$uid" = 0 ]]; then
+        read -r -p '用哪个服务器 SSH 账号取回文件？[root]: ' account
+        account=${account:-root}
+    else
+        account=$(id -nu "$uid") || fail '找不到调用 sudo 的 SSH 账号。'
+    fi
+    record=$(getent -- passwd "$account") || fail '服务器上没有这个账号。'
+    IFS=: read -r account _ uid gid _ home _ <<< "$record"
+    [[ "$account" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*\$?$ ]] || fail 'SSH 账号名无效。'
+    [[ "$home" = /* && -d "$home" ]] || fail 'SSH 账号缺少主目录。'
+
+    # Open the two private sources as root. Create every destination as the SSH user.
+    dir=$(setpriv --reuid="$uid" --regid="$gid" --init-groups --no-new-privs -- bash -eu -c '
+        umask 077
+        cd -- "$1"
+        dir=$(mktemp -d "dsvpn-$2.XXXXXXXX")
+        cleanup() { rm -rf -- "$dir"; }
+        trap cleanup EXIT
+        cat > "$dir/dsvpn"
+        chmod 700 "$dir/dsvpn"
+        cat <&3 > "$dir/vpn.key"
+        chmod 600 "$dir/vpn.key"
+        printf "%s\n" "$dir"
+        trap - EXIT
+    ' bash "$home" "$platform" < "$runtime/release/clients/$platform/dsvpn" 3< "$cfg/vpn.key" 9>&-) ||
+        fail '私有导出失败，请检查服务状态和 SSH 账号主目录的写权限。'
+    host=$(setting SERVER_HOST); port=$(setting VPN_PORT)
+    local ssh_host=$host
+    if [[ "$host" = *:* ]]; then ssh_host="[$host]"; fi
+    echo '在客户端执行以下三行。SSH 使用自定义端口时，请在 scp 后加 -P 端口号。'
+    printf "  scp -pr '%s@%s:%s' .\n" "$account" "$ssh_host" "$dir"
+    printf '  cd %s\n  sudo ./dsvpn client ./vpn.key %s %s\n' "$dir" "$host" "$port"
+    printf '取回后，服务器 SSH 账号 %s 可在其主目录执行 rm -r -- %s 删除本次导出。\n' "$account" "$dir"
 }
 
 check_port() {
@@ -204,11 +246,12 @@ check_ready() {
 check_ownership
 action=install
 if [ -f "$units/fkgfw-dsvpn.service" ]; then
-    echo 'DSVPN：1. 查看客户端下载及连接信息  2. 修改地址或端口  3. 卸载 DSVPN'
+    echo 'DSVPN：1. 查看客户端下载及连接信息  2. 修改地址或端口  3. 卸载 DSVPN  4. 通过 SCP 导出客户端和密钥'
     read -r -p '选择操作 [默认 1]: ' choice
     case "${choice:-1}" in
         1) show_clients; exit ;;
         2) action=edit ;;
+        4) export_client; exit ;;
         3) read -r -p '卸载 DSVPN 及下载服务，保留私有密钥与端口配置？输入 yes: ' answer
            [ "$answer" = yes ] || exit 0; action=remove ;;
         *) fail '无效操作。' ;;
