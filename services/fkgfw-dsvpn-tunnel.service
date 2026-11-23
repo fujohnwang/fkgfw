@@ -1,0 +1,30 @@
+# Managed by fkgfw (DSVPN)
+[Unit]
+Description=fkgfw DSVPN HTTPS client downloads via Cloudflare Tunnel
+BindsTo=fkgfw-dsvpn.service
+PartOf=fkgfw-dsvpn.service
+Wants=network-online.target fkgfw-dsvpn-download.service
+After=fkgfw-dsvpn.service network-online.target fkgfw-dsvpn-download.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+DynamicUser=yes
+EnvironmentFile=/etc/fkgfw-dsvpn/server.env
+RuntimeDirectory=fkgfw-dsvpn-tunnel
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/@ARCH@/cloudflared:/run/fkgfw-dsvpn-tunnel/cloudflared
+BindReadOnlyPaths=/etc/fkgfw-dsvpn/tunnel.yml:/run/fkgfw-dsvpn-tunnel/tunnel.yml
+ExecStart=/usr/bin/env /run/fkgfw-dsvpn-tunnel/cloudflared tunnel --config /run/fkgfw-dsvpn-tunnel/tunnel.yml --no-autoupdate --metrics 127.0.0.1:0 --url http://127.0.0.1:${DOWNLOAD_PORT}
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/etc/fkgfw-dsvpn
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

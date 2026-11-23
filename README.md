@@ -94,17 +94,23 @@ VLESS TLS + Vision 和 AnyTLS 均使用普通 TLS、受信任证书和服务器�
 
 ## 部署 DSVPN 和客户端下载
 
-保留仓库中的 `artifacts/dsvpn/`、`services/`、`lib/` 和安装入口。服务器采用 x86_64 或 aarch64 Linux、systemd 和 TUN，需启用 IPv4 转发并支持 IPv6 接口配置。安装器检查转发状态；如需持久化，请在主机的 sysctl 配置中设置 `net.ipv4.ip_forward=1`。Linux 使用 iproute2 和 iptables。
+先把 fkgfw 克隆到服务器的长期目录。systemd 直接执行仓库中的制品，下载服务也从同一版本目录读取客户端。请用 root 管理该 checkout，服务运行期间保留其路径并允许服务创建运行时硬链接。服务器采用 x86_64 或 aarch64 Linux、systemd 和 TUN，需启用 IPv4 转发并支持 IPv6 接口配置。安装器检查转发状态；如需持久化，请在主机的 sysctl 配置中设置 `net.ipv4.ip_forward=1`。Linux 使用 iproute2 和 iptables。
 
 ```bash
+sudo git clone https://github.com/fujohnwang/fkgfw.git /srv/fkgfw
+cd /srv/fkgfw
 sudo bash install.sh dsvpn
 # 有固定域名或 NAT 公网地址时，可以指定交互默认值
 sudo env SERVER_ADDRESS=vpn.example.org bash reality_hy2_ws.sh dsvpn
 ```
 
-新装时也可在两个入口选 `12`，已有 sing-box 管理菜单选 `7`。确认客户端能访问的公网域名/IP 和两个 TCP 端口，默认 VPN 为 `1959`、HTTP 下载为 `1960`。在安全组及主机入站防火墙放行这两个端口。DSVPN 自行管理隧道转发和 NAT。DSVPN 可与 sing-box 独立安装、更新及卸载。
+新装时也可在两个入口选 `12`，已有 sing-box 管理菜单选 `7`。填写 VPN 服务器公网域名或 IP。在安全组和主机入站防火墙放行 VPN 端口（默认 **1959/TCP 和 1959/UDP**）。下载源站默认监听 `127.0.0.1:1960`，1960/TCP 的公网入站可以关闭。DSVPN 自行管理隧道转发和 NAT，可与 sing-box 独立安装及卸载。
 
-部署成功后显示 Linux amd64、Linux arm64、macOS Intel、macOS Apple Silicon 四个下载链接及 SHA-256。下载由该 VPS 提供。URL 中的版本取自整套客户端的校验清单，升级替换公开目录；旧 URL 不会返回其他版本的文件。重新运行安装入口，在 DSVPN 管理菜单选 `1` 可查看当前部署的链接，即使仓库中的制品已替换也会显示已安装版本。
+从 2.1.0 起，客户端优先连接 TCP。TCP 连接失败或握手超时后，客户端在同一端口通过 KCP/UDP 重新认证，使用同一份 `vpn.key`。日志中的 `Connected (TCP)` 或 `Connected (KCP/UDP)` 表示实际传输方式。
+
+VPS 上的独立 cloudflared 服务向 Cloudflare 建立出站连接。隧道就绪后，安装器打印四个平台的 HTTPS 下载链接及 SHA-256。客户端只需能访问这个网页，文件由部署的 VPS 提供。Quick Tunnel 自动分配 `trycloudflare.com` 临时域名，连接器重启后请在 DSVPN 管理菜单选 `1` 获取当前链接。路径中的版本取自本次 VPN 启动时选定的客户端校验清单。
+
+服务器需要 DNS、访问 Cloudflare 注册接口的出站 HTTPS，以及到 Tunnel 边缘的出站 7844（QUIC 使用 UDP，HTTP/2 使用 TCP）。如果安装时隧道尚未连通，VPN 可独立使用；连接器会重试，菜单 `1` 在隧道就绪后显示链接。Quick Tunnel 无可用性保证。[Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)
 
 客户端选择与 `uname -s`、`uname -m` 相符的文件。通过可信渠道取得安装终端打印的 SHA-256 并核对下载，再赋予执行权限。macOS 程序为 ad-hoc 签名，未经 Apple 公证。通过 SSH/SFTP 等保密渠道取得服务器上的 `/etc/fkgfw-dsvpn/vpn.key`，在客户端将它安装成 root 所有、模式 600 的 32 字节文件。
 
@@ -114,7 +120,9 @@ chmod +x ./dsvpn
 sudo ./dsvpn client /etc/dsvpn/vpn.key vpn.example.org 1959
 ```
 
-DSVPN 管理菜单的 `2` 修改地址或端口，`3` 用仓库内整套制品升级，`4` 卸载 VPN 与下载服务。改端口、升级、卸载后重装均保留密钥。两个服务的日志可用 `journalctl -u fkgfw-dsvpn -u fkgfw-dsvpn-download` 查看。下载服务以独立的非特权账户读取公开目录，密钥位于私有配置目录。
+节点执行 `git pull` 后，当前 VPN 连接和客户端下载继续使用运行中的版本。要启用拉取的新制品，执行 `sudo systemctl restart fkgfw-dsvpn`。每次服务启动（包括服务器重启）都会校验并使用仓库 `artifacts/dsvpn/latest/` 中的制品。下载服务随 VPN 一起切换，重启后可在菜单 `1` 获取与该次启动匹配的四个 HTTPS 链接和 SHA-256。
+
+管理菜单的 `1` 查看连接和下载信息，`2` 修改地址或端口，`3` 卸载 VPN、下载源站及下载隧道。卸载保留仓库、密钥与端口配置。可用 `journalctl -u fkgfw-dsvpn -u fkgfw-dsvpn-download -u fkgfw-dsvpn-tunnel` 查看日志。下载服务以独立的非特权账户读取公开目录，密钥位于私有配置目录。
 
 ## 稳定版与升级
 
@@ -220,4 +228,4 @@ docker run --rm --init --network none -e FKGFW_CONTAINER_TEST=1 \
   --workdir /repo fkgfw-smoke:local python3 tests/linux-cleanup.py
 ```
 
-DSVPN 回归使用带 systemd、TUN 和 IPv4 转发的全新可丢弃 Linux 虚拟机，需事先安装 iputils-ping。测试会安装和移除服务、创建测试网络命名空间。进入仓库后运行 `sudo env FKGFW_DSVPN_TEST=1 bash tests/linux-dsvpn.sh`，覆盖四个平台的实际下载、隧道流量、改端口、升级、回滚和卸载重装。
+DSVPN 回归使用带 systemd、TUN 和 IPv4 转发的全新可丢弃 Linux 虚拟机，需事先安装 git 和 iputils-ping。运行 `sudo env FKGFW_DSVPN_TEST=1 bash tests/linux-dsvpn.sh`，验证四个平台的源站文件、HTTPS 链接生成、隧道断线提示、VPN 流量、拉取制品时保留连接、重启后服务端与下载同步切版、损坏制品拒绝启动、卸载重装及安装失败回滚。默认使用本机模拟的连接器状态；要实际经公网 HTTPS 下载四份制品，可同时设置 `FKGFW_DSVPN_LIVE_TUNNEL=1`，测试期间 Cloudflare 会公开该虚拟机上的客户端文件。

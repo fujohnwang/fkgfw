@@ -1,13 +1,28 @@
 # Managed by fkgfw (DSVPN)
 [Unit]
 Description=fkgfw DSVPN client downloads
-After=network.target
+BindsTo=fkgfw-dsvpn.service
+PartOf=fkgfw-dsvpn.service
+After=fkgfw-dsvpn.service network.target
 
 [Service]
 Type=exec
 DynamicUser=yes
 EnvironmentFile=/etc/fkgfw-dsvpn/server.env
-ExecStart=/opt/fkgfw-dsvpn/darkhttpd /opt/fkgfw-dsvpn/public --ipv6 --port ${DOWNLOAD_PORT} --no-listing --no-server-id --maxconn 64
+EnvironmentFile=/run/fkgfw-dsvpn/download.env
+RuntimeDirectory=fkgfw-dsvpn-download
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/@ARCH@/darkhttpd:/run/fkgfw-dsvpn-download/darkhttpd
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/SHA256SUMS:/run/fkgfw-dsvpn-download/clients/SHA256SUMS
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/LICENSE:/run/fkgfw-dsvpn-download/clients/LICENSE
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/KCP-LICENSE:/run/fkgfw-dsvpn-download/clients/KCP-LICENSE
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/Monocypher-LICENCE.md:/run/fkgfw-dsvpn-download/clients/Monocypher-LICENCE.md
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/linux-amd64/dsvpn:/run/fkgfw-dsvpn-download/clients/linux-amd64/dsvpn
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/linux-arm64/dsvpn:/run/fkgfw-dsvpn-download/clients/linux-arm64/dsvpn
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/macos-amd64/dsvpn:/run/fkgfw-dsvpn-download/clients/macos-amd64/dsvpn
+BindReadOnlyPaths=/run/fkgfw-dsvpn/release/clients/macos-arm64/dsvpn:/run/fkgfw-dsvpn-download/clients/macos-arm64/dsvpn
+ExecStartPre=/bin/mkdir -p /run/fkgfw-dsvpn-download/public
+ExecStartPre=/bin/ln -sfnT ../clients /run/fkgfw-dsvpn-download/public/${BUNDLE}
+ExecStart=/usr/bin/env /run/fkgfw-dsvpn-download/darkhttpd /run/fkgfw-dsvpn-download/public --addr 127.0.0.1 --port ${DOWNLOAD_PORT} --no-listing --no-server-id --maxconn 64
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

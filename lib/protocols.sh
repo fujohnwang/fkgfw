@@ -173,13 +173,18 @@ collect_inbound() (
     jq -f "$SCRIPT_DIR/lib/new-inbound.jq" <<< "$params"
 )
 
+dsvpn_listeners() {
+    jq -cn --argjson vpn "$1" --argjson download "$2" '
+        [{port:$vpn,network:"tcp"},{port:$download,network:"tcp"},{port:$vpn,network:"udp"}]'
+}
+
 installed_dsvpn_ports() {
     if [ -f /etc/systemd/system/fkgfw-dsvpn.service ]; then
         local vpn download
         vpn=$(sed -n 's/^VPN_PORT=//p' /etc/fkgfw-dsvpn/server.env) || return 1
         download=$(sed -n 's/^DOWNLOAD_PORT=//p' /etc/fkgfw-dsvpn/server.env) || return 1
         [[ "$vpn" =~ ^[1-9][0-9]{0,4}$ && "$download" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
-        printf '[%s,%s]\n' "$vpn" "$download"
+        dsvpn_listeners "$vpn" "$download"
     else
         echo '[]'
     fi
@@ -195,10 +200,11 @@ validate_listeners() {
              if (.network // "") == "" or .network == [] then ["tcp", "udp"]
              elif (.network | type) == "array" then .network else [.network] end
            else ["tcp"] end)[] as $network
-        | {port: $inbound.listen_port, network: $network}] + [$dsvpn[] | {port: ., network: "tcp"}]) as $ports
+        | {port: $inbound.listen_port, network: $network}] + $dsvpn) as $ports
       | (all($ports[]; .port >= 1 and .port <= 65535))
         and (($ports | unique | length) == ($ports | length))
-        and (if any(.inbounds[]; .tls.certificate_provider? == "fkgfw-acme") then ($dsvpn | index(80)) == null else true end)
+        and (if any(.inbounds[]; .tls.certificate_provider? == "fkgfw-acme") then
+          all($dsvpn[]; .network != "tcp" or .port != 80) else true end)
         and (if any(.inbounds[]; .tag == "vmess-in" or .tag == "vless-ws-in") then
           all($ports[]; .network != "tcp" or .port != $caddy_port)
           and ([.inbounds[] | select(.tag == "vmess-in" or .tag == "vless-ws-in") | .transport.path] as $paths

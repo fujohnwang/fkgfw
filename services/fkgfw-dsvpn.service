@@ -1,13 +1,20 @@
 # Managed by fkgfw (DSVPN)
 [Unit]
 Description=fkgfw DSVPN server
-Wants=network-online.target
+Wants=network-online.target fkgfw-dsvpn-download.service fkgfw-dsvpn-tunnel.service
 After=network-online.target
 
 [Service]
 Type=exec
 EnvironmentFile=/etc/fkgfw-dsvpn/server.env
-ExecStart=/opt/fkgfw-dsvpn/server server /etc/fkgfw-dsvpn/vpn.key :: ${VPN_PORT}
+RuntimeDirectory=fkgfw-dsvpn
+RuntimeDirectoryMode=0700
+# The root-owned selector checks the real checkout, including paths under /root or /tmp.
+ExecStartPre=+/bin/bash /etc/fkgfw-dsvpn/select-release activate
+# The release link is created by ExecStartPre. ExecStart needs the resulting executable.
+BindReadOnlyPaths=-/run/fkgfw-dsvpn/release/clients/@ARCH@/dsvpn:/run/fkgfw-dsvpn/dsvpn
+ExecStart=/usr/bin/env /run/fkgfw-dsvpn/dsvpn server /etc/fkgfw-dsvpn/vpn.key :: ${VPN_PORT}
+ExecStopPost=+/bin/bash /etc/fkgfw-dsvpn/select-release deactivate
 Restart=on-failure
 RestartSec=3
 KillMode=mixed
