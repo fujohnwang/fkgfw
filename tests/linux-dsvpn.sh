@@ -84,6 +84,8 @@ if [[ "$deploy_uid" != 0 ]]; then
 fi
 sysctl -qw net.ipv4.ip_forward=0
 invoke install.sh $'12\n\n\n'
+grep -Fxq 'DSVPN_KCP_STATS=0' "$cfg/server.env"
+grep -Fxq 'DSVPN_KCP_FIXED_MTU=0' "$cfg/server.env"
 [[ $(< /proc/sys/net/ipv4/ip_forward) = 1 ]]
 [[ $(cat "$cfg/deploy.uid") = "$deploy_uid" && $(stat -c '%u:%a' "$cfg/deploy.uid") = 0:600 ]]
 [[ $(stat -c '%u:%a' /opt/fkgfw-dsvpn) = 0:700 && ! -e "$repo/artifacts/dsvpn/.fkgfw-dsvpn-running" ]]
@@ -222,6 +224,7 @@ for transport in TCP KCP/UDP; do
         ip netns exec "$ns" ping -c 1 -W 2 192.168.192.254
         ip netns exec "$ns" iptables -A OUTPUT -p tcp --syn -d 198.18.75.1 --dport 1959 -j DROP
         sysctl -qw net.ipv4.ip_forward=0
+        sed -i 's/^DSVPN_KCP_STATS=0$/DSVPN_KCP_STATS=1/' "$cfg/server.env"
         systemctl restart "$service"
         [[ $(< /proc/sys/net/ipv4/ip_forward) = 1 ]]
         bundle=$next_bundle
@@ -230,6 +233,9 @@ for transport in TCP KCP/UDP; do
     grep -Fq "Connected ($transport)" "$work/client.log" || { cat "$work/client.log"; exit 1; }
     ip netns exec "$ns" ping -s 4000 -c 2 -W 4 192.168.192.254
 done
+srv_log=$(journalctl -u "$service" --no-pager)
+grep -Fq 'KCP stats role=server phase=start' <<< "$srv_log"
+grep -Fq 'KCP mtu role=server' <<< "$srv_log"
 check_inodes "$release"
 for platform in linux-amd64 linux-arm64 macos-amd64 macos-arm64; do
     curl -fsS --noproxy '*' "http://127.0.0.1:1960/$bundle/$platform/dsvpn" | cmp - "$release/clients/$platform/dsvpn"
@@ -246,6 +252,7 @@ ip -n "$ns" -o link show | grep -q 'tun[0-9]' && exit 1
 ip -n "$ns" rule show | cmp - "$work/before4"
 ip -n "$ns" -6 rule show | cmp - "$work/before6"
 invoke reality_hy2_ws.sh $'2\n\n2959\n2960' dsvpn
+grep -Fxq 'DSVPN_KCP_STATS=1' "$cfg/server.env"
 grep -Fq ".trycloudflare.com/$bundle/" "$work/log"
 [[ $(ss -H -ltn 'sport = :2960' | awk '{print $4}') = 127.0.0.1:2960 ]]
 [[ $(sha256sum "$cfg/vpn.key") = "$key" ]]

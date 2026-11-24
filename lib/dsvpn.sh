@@ -153,8 +153,12 @@ check_port() {
 
 read_settings() {
     local old_host='' default_vpn=1959 default_download=1960
+    kcp_stats=0
+    kcp_fixed_mtu=0
     if [ -f "$cfg/server.env" ]; then
         old_host=$(setting SERVER_HOST); default_vpn=$(setting VPN_PORT); default_download=$(setting DOWNLOAD_PORT)
+        if [[ $(setting DSVPN_KCP_STATS) = 1 ]]; then kcp_stats=1; fi
+        if [[ $(setting DSVPN_KCP_FIXED_MTU) = 1 ]]; then kcp_fixed_mtu=1; fi
     fi
     old_host=${SERVER_ADDRESS:-$old_host}
     if [ -z "$old_host" ]; then old_host=$(server_address) || old_host=''; fi
@@ -311,7 +315,10 @@ for name in "${services[@]}"; do
     install -m 644 "$work/$name.service" "$units/$name.service"
 done
 if [ ! -f "$cfg/vpn.key" ]; then head -c 32 /dev/urandom > "$cfg/vpn.key"; fi
-printf '%s\nVPN_PORT=%s\nDOWNLOAD_PORT=%s\nSERVER_HOST=%s\n' "$marker" "$vpn" "$download" "$host" > "$cfg/server.env"
+{
+    printf '%s\nVPN_PORT=%s\nDOWNLOAD_PORT=%s\nSERVER_HOST=%s\n' "$marker" "$vpn" "$download" "$host"
+    printf 'DSVPN_KCP_STATS=%s\nDSVPN_KCP_FIXED_MTU=%s\n' "$kcp_stats" "$kcp_fixed_mtu"
+} > "$cfg/server.env"
 systemctl daemon-reload
 systemctl enable --now "${services[@]}"
 check_ready

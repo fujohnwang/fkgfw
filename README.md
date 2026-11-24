@@ -108,6 +108,14 @@ sudo env SERVER_ADDRESS=vpn.example.org bash reality_hy2_ws.sh dsvpn
 
 从 2.1.0 起，客户端优先连接 TCP。TCP 连接失败或握手超时后，客户端在同一端口通过 KCP/UDP 重新认证，使用同一份 `vpn.key`。日志中的 `Connected (TCP)` 或 `Connected (KCP/UDP)` 表示实际传输方式。
 
+从 2.2.0 起，两端分别探测各自发送方向能通过的 UDP 负载大小，在 512–1400 字节之间选档。与 2.1.x 互通时沿用 1200 字节。排查 KCP 链路时，可以只开客户端统计：
+
+```bash
+sudo ./dsvpn --kcp-stats client ./vpn.key <服务器地址> 1959
+```
+
+服务端用 `sudoedit /etc/fkgfw-dsvpn/server.env` 将 `DSVPN_KCP_STATS` 设为 `1`（旧安装可追加 `DSVPN_KCP_STATS=1`），执行 `sudo systemctl restart fkgfw-dsvpn` 后，用 `sudo journalctl -fu fkgfw-dsvpn` 查看。日志每 5 秒报告本端最新及平滑 RTT、累计重传段数、待发和未确认段数、区间积压峰值，以及当前发送上限 `udp_limit`。要做同链路对照，可在客户端增加 `--kcp-fixed-mtu`，本次连接双向固定为 1200 字节。服务端也可以设置 `DSVPN_KCP_FIXED_MTU=1` 后重启。
+
 VPS 上的独立 cloudflared 服务向 Cloudflare 建立出站连接。隧道就绪后，安装器打印四个平台的 HTTPS 下载链接及 SHA-256。客户端只需能访问这个网页，文件由部署的 VPS 提供。Quick Tunnel 自动分配 `trycloudflare.com` 临时域名，连接器重启后请在 DSVPN 管理菜单选 `1` 获取当前链接。路径中的版本取自本次 VPN 启动时选定的客户端校验清单。
 
 服务器需要 DNS、访问 Cloudflare 注册接口的出站 HTTPS，以及到 Tunnel 边缘的出站 7844（QUIC 使用 UDP，HTTP/2 使用 TCP）。如果安装时隧道尚未连通，VPN 可独立使用；连接器会重试，菜单 `1` 在隧道就绪后显示链接。Quick Tunnel 无可用性保证。[Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)
